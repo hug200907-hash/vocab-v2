@@ -257,7 +257,7 @@ def call_llm_api(prompt, api_key=None):
         key = api_key
 
         if not key:
-            key = st.secrets["AQ.Ab8RN6JEtcT4QjQa4twbM-9eFWOTIRThjCF_7j-IA79KzsaWpg"]
+            key = st.secrets[AQ.Ab8RN6JEtcT4QjQa4twbM-9eFWOTIRThjCF_7j-IA79KzsaWpg]
 
         client = genai.Client(api_key=key)
 
