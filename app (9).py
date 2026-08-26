@@ -252,66 +252,36 @@ def fetch_word_full_data(word):
     }
 
 def call_llm_api(prompt, api_key=None):
-    try:
-        from google import genai as google_genai
-        from google.oauth2 import service_account
+    """
+    Gọi Gemini AI.
+    Ưu tiên API key truyền vào, nếu không có thì lấy từ:
+    1. st.secrets["GEMINI_API_KEY"]
+    2. biến môi trường GEMINI_API_KEY
+    """
 
-        # ==========================================
-        # LẤY SERVICE ACCOUNT TỪ STREAMLIT SECRETS
-        # ==========================================
-        if "gcp_service_account" not in st.secrets:
-            st.error(
-                "❌ Không tìm thấy [gcp_service_account] "
-                "trong Streamlit Secrets."
-            )
-            return None
+    import os
 
-        sa_info = dict(st.secrets["gcp_service_account"])
+    # =========================================================
+    # 1. LẤY API KEY
+    # =========================================================
+    active_key = api_key
 
-        # ==========================================
-        # TẠO GOOGLE CLOUD CREDENTIALS
-        # ==========================================
-        credentials = service_account.Credentials.from_service_account_info(
-            sa_info,
-            scopes=[
-                "https://www.googleapis.com/auth/cloud-platform"
-            ]
-        )
+    if not active_key:
+        try:
+            active_key = st.secrets[api_key]
+        except Exception:
+            active_key = None
 
-        # ==========================================
-        # TẠO VERTEX AI CLIENT
-        # ==========================================
-        client = google_genai.Client(
-            vertexai=True,
-            project=sa_info["project_id"],
-            location="us-central1",
-            credentials=credentials
-        )
+    if not active_key:
+        active_key = os.getenv("GEMINI_API_KEY")
 
-        # ==========================================
-        # GỌI GEMINI QUA VERTEX AI
-        # ==========================================
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-
-        # ==========================================
-        # LẤY KẾT QUẢ
-        # ==========================================
-        if response is not None and response.text:
-            return response.text.strip()
-
-        st.error("❌ Vertex AI không trả về nội dung.")
-        return None
-
-    except Exception as e:
+    if not active_key:
         st.error(
-            f"❌ Vertex AI ERROR: "
-            f"{type(e).__name__}: {e}"
+            "❌ Chưa tìm thấy GEMINI_API_KEY.\n\n"
+            "Vào Streamlit Cloud → Settings → Secrets và thêm:\n\n"
+            "GEMINI_API_KEY = \"API_KEY_CỦA_BẠN\""
         )
         return None
-
     # =========================================================
     # 2. IMPORT SDK MỚI
     # =========================================================
