@@ -253,34 +253,50 @@ def fetch_word_full_data(word):
 
 def call_llm_api(prompt, api_key=None):
     """
-    Gọi Gemini AI.
-    Ưu tiên API key truyền vào, nếu không có thì lấy từ:
-    1. st.secrets["GEMINI_API_KEY"]
-    2. biến môi trường GEMINI_API_KEY
+    Gọi Gemini API sử dụng Key lưu sẵn trên Streamlit Secrets
     """
-
     import os
+    from google import genai
 
-    # =========================================================
-    # 1. LẤY API KEY
-    # =========================================================
+    # 1. Lấy API Key từ Secrets hoặc Parameter
     active_key = api_key
-
     if not active_key:
         try:
-            active_key = st.secrets[api_key]
+            active_key = st.secrets["GEMINI_API_KEY"]
         except Exception:
-            active_key = None
+            active_key = os.getenv("GEMINI_API_KEY")
 
     if not active_key:
-        active_key = os.getenv("GEMINI_API_KEY")
+        st.error("❌ Chưa tìm thấy `GEMINI_API_KEY` trong Streamlit Secrets!")
+        return None
 
-    if not active_key:
-        st.error(
-            "❌ Chưa tìm thấy GEMINI_API_KEY.\n\n"
-            "Vào Streamlit Cloud → Settings → Secrets và thêm:\n\n"
-            "GEMINI_API_KEY = \"API_KEY_CỦA_BẠN\""
+    # 2. Gọi API
+    try:
+        client = genai.Client(api_key=active_key)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
         )
+
+        if not response or not hasattr(response, "text"):
+            st.error("❌ Không nhận được phản hồi chữ từ Gemini.")
+            return None
+
+        clean_text = response.text.strip()
+        
+        # Bóc tách Markdown block (```json ... ```) để tránh lỗi parse JSON
+        if clean_text.startswith("```"):
+            lines = clean_text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            clean_text = "\n".join(lines).strip()
+
+        return clean_text
+
+    except Exception as e:
+        st.error(f"❌ Lỗi Gemini API: `{e}`")
         return None
     # =========================================================
     # 2. IMPORT SDK MỚI
