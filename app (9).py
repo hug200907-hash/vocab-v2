@@ -253,83 +253,67 @@ def fetch_word_full_data(word):
 
 def call_llm_api(prompt, api_key=None):
     """
-    Gọi Gemini API chuẩn hóa cho SDK google-genai trên Streamlit
+    Gọi Gemini REST API trực tiếp bằng Access Token (AQ.Ab8RN6...)
     """
     import os
-    from google import genai
-
-    # 1. Lấy API Key từ Secrets hoặc biến môi trường
-    active_key = api_key
-    if not active_key:
+    
+    # 1. Lấy Token từ Secrets
+    token = api_key
+    if not token:
         try:
-            active_key = st.secrets["GEMINI_API_KEY"]
+            token = st.secrets["GEMINI_API_KEY"]
         except Exception:
-            active_key = os.getenv("GEMINI_API_KEY")
+            token = os.getenv("GEMINI_API_KEY")
 
-    if not active_key:
-        st.error("❌ Chưa tìm thấy `GEMINI_API_KEY` trong Streamlit Secrets!")
+    if not token:
+        st.error("❌ Chưa tìm thấy `GEMINI_API_KEY` trong Secrets!")
         return None
 
-    # Làm sạch chuỗi Key (tránh lỗi ký tự lạ/khoảng trắng)
-    active_key = str(active_key).strip()
+    token = str(token).strip()
 
-    # 2. Khởi tạo Client và gọi Model
+    # 2. Endpoint Gemini API
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}"  # Truyền dạng OAuth Bearer Token
+    }
+
+    payload = {
+        "contents": [
+            {
+                "parts": [{"text": prompt}]
+            }
+        ]
+    }
+
     try:
-        # Khởi tạo client truyền trực tiếp api_key
-        client = genai.Client(api_key=active_key)
-        
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
+        req = urllib.request.Request(
+            url, 
+            data=json.dumps(payload).encode("utf-8"), 
+            headers=headers, 
+            method="POST"
         )
 
-        if not response or not hasattr(response, "text"):
-            st.error("❌ Không nhận được phản hồi chữ từ Gemini.")
-            return None
-
-        clean_text = response.text.strip()
-
-        # Bóc tách Markdown block (```json ... ```)
-        if clean_text.startswith("```"):
-            lines = clean_text.splitlines()
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            clean_text = "\n".join(lines).strip()
-
-        return clean_text
-
-    except Exception as e:
-        st.error(f"❌ Lỗi Gemini API: `{e}`")
-        return None
-    # 2. Gọi API
-    try:
-        client = genai.Client(api_key=active_key)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-
-        if not response or not hasattr(response, "text"):
-            st.error("❌ Không nhận được phản hồi chữ từ Gemini.")
-            return None
-
-        clean_text = response.text.strip()
-        
-        # Bóc tách Markdown block (```json ... ```) để tránh lỗi parse JSON
-        if clean_text.startswith("```"):
-            lines = clean_text.splitlines()
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            clean_text = "\n".join(lines).strip()
-
-        return clean_text
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            
+            # Trích xuất văn bản trả về
+            text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+            
+            # Làm sạch Markdown code block
+            if text.startswith("```"):
+                lines = text.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                text = "\n".join(lines).strip()
+                
+            return text
 
     except Exception as e:
-        st.error(f"❌ Lỗi Gemini API: `{e}`")
+        st.error(f"❌ Lỗi Gemini API (OAuth Bearer): `{e}`")
         return None
     # =========================================================
     # 2. IMPORT SDK MỚI
