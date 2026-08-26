@@ -4,7 +4,6 @@ import time
 import urllib.parse
 import urllib.request
 import re
-from google import genai
 from datetime import datetime, timedelta
 
 import streamlit as st
@@ -254,25 +253,63 @@ def fetch_word_full_data(word):
 
 def call_llm_api(prompt, api_key=None):
     try:
-        key = api_key
+        from google import genai as google_genai
+        from google.oauth2 import service_account
 
-        if not key:
-            key = st.secrets["GEMINI_API_KEY"]
-        client = genai.Client(api_key=key)
+        # ==========================================
+        # LẤY SERVICE ACCOUNT TỪ STREAMLIT SECRETS
+        # ==========================================
+        if "gcp_service_account" not in st.secrets:
+            st.error(
+                "❌ Không tìm thấy [gcp_service_account] "
+                "trong Streamlit Secrets."
+            )
+            return None
 
+        sa_info = dict(st.secrets["gcp_service_account"])
+
+        # ==========================================
+        # TẠO GOOGLE CLOUD CREDENTIALS
+        # ==========================================
+        credentials = service_account.Credentials.from_service_account_info(
+            sa_info,
+            scopes=[
+                "https://www.googleapis.com/auth/cloud-platform"
+            ]
+        )
+
+        # ==========================================
+        # TẠO VERTEX AI CLIENT
+        # ==========================================
+        client = google_genai.Client(
+            vertexai=True,
+            project=sa_info["project_id"],
+            location="us-central1",
+            credentials=credentials
+        )
+
+        # ==========================================
+        # GỌI GEMINI QUA VERTEX AI
+        # ==========================================
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt
         )
 
-        if response and response.text:
+        # ==========================================
+        # LẤY KẾT QUẢ
+        # ==========================================
+        if response is not None and response.text:
             return response.text.strip()
 
-        st.error("Gemini không trả về nội dung.")
+        st.error("❌ Vertex AI không trả về nội dung.")
         return None
 
     except Exception as e:
-        st.error(f"Gemini API lỗi: {type(e).__name__}: {e}")
+        st.error(
+            f"❌ Vertex AI ERROR: "
+            f"{type(e).__name__}: {e}"
+        )
         return None
 
     # =========================================================
