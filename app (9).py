@@ -253,32 +253,33 @@ def fetch_word_full_data(word):
 
 def call_llm_api(prompt, api_key=None):
     """
-    Gọi OpenAI API (GPT-4o-mini) trực tiếp bằng thư viện urllib chuẩn.
+    Gọi Kimi AI (Moonshot AI) trực tiếp qua REST API
     """
     import os
     import json
     import urllib.request
+    import urllib.error
 
     # 1. Lấy API Key từ Secrets hoặc biến môi trường
     active_key = api_key
     if not active_key:
         try:
-            active_key = st.secrets["OPENAI_API_KEY"]
+            active_key = st.secrets["KIMI_API_KEY"]
         except Exception:
-            active_key = os.getenv("OPENAI_API_KEY")
+            active_key = os.getenv("KIMI_API_KEY")
 
     if not active_key:
         st.error(
-            "❌ Chưa tìm thấy `OPENAI_API_KEY`!\n\n"
+            "❌ Chưa tìm thấy `KIMI_API_KEY`!\n\n"
             "Vào Streamlit Cloud → Settings → Secrets và thêm:\n\n"
-            'OPENAI_API_KEY = "sk-proj-..."'
+            'KIMI_API_KEY = "sk-..."'
         )
         return None
 
     active_key = str(active_key).strip()
 
-    # 2. Chuẩn bị request cho OpenAI API
-    url = "https://api.openai.com/v1/chat/completions"
+    # 2. Endpoint & Headers của Moonshot AI (Kimi)
+    url = "https://api.moonshot.cn/v1/chat/completions"
     
     headers = {
         "Content-Type": "application/json",
@@ -286,7 +287,7 @@ def call_llm_api(prompt, api_key=None):
     }
 
     payload = {
-        "model": "gpt-4o-mini",  # Model tối ưu chi phí & tốc độ cao nhất của OpenAI hiện tại
+        "model": "moonshot-v1-8k",  # Model Kimi AI phổ biến & phản hồi nhanh
         "messages": [
             {"role": "user", "content": prompt}
         ],
@@ -307,7 +308,7 @@ def call_llm_api(prompt, api_key=None):
             # Trích xuất nội dung trả về
             text = result["choices"][0]["message"]["content"].strip()
 
-            # Tự động lọc bỏ markdown code block (```json ... ```) để xử lý dữ liệu an toàn
+            # Tự động lọc bỏ markdown code block (```json ... ```)
             if text.startswith("```"):
                 lines = text.splitlines()
                 if lines[0].startswith("```"):
@@ -318,54 +319,11 @@ def call_llm_api(prompt, api_key=None):
 
             return text
 
-    except Exception as e:
-        st.error(f"❌ **Lỗi OpenAI API:** `{e}`")
+    except urllib.error.HTTPError as e:
+        st.error(f"❌ **Lỗi Kimi API (HTTP {e.code}):** {e.reason}")
         return None
-    # =========================================================
-    # 3. KẾT NỐI GEMINI
-    # =========================================================
-    try:
-        client = genai.Client(api_key=active_key)
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-
-        # =====================================================
-        # 4. LẤY TEXT
-        # =====================================================
-        if response is None:
-            st.error("❌ Gemini không trả về response.")
-            return None
-
-        text = getattr(response, "text", None)
-
-        if text:
-            return text.strip()
-
-        # Một số trường hợp response có candidates nhưng text
-        # không được expose trực tiếp
-        if hasattr(response, "candidates"):
-            candidates = response.candidates
-
-            if candidates:
-                try:
-                    parts = candidates[0].content.parts
-
-                    text_parts = []
-
-                    for part in parts:
-                        if hasattr(part, "text") and part.text:
-                            text_parts.append(part.text)
-
-                    if text_parts:
-                        return "\n".join(text_parts).strip()
-
-                except Exception:
-                    pass
-
-        st.error("❌ Gemini trả về dữ liệu nhưng không có nội dung text.")
+    except Exception as e:
+        st.error(f"❌ **Lỗi Kimi API:** `{e}`")
         return None
 
     # =========================================================
