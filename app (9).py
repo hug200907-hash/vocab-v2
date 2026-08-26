@@ -253,7 +253,7 @@ def fetch_word_full_data(word):
 
 def call_llm_api(prompt, api_key=None):
     """
-    Gọi Kimi AI (Moonshot AI) trực tiếp qua REST API
+    Gọi OpenRouter API trực tiếp qua REST API (sử dụng urllib chuẩn)
     """
     import os
     import json
@@ -264,30 +264,33 @@ def call_llm_api(prompt, api_key=None):
     active_key = api_key
     if not active_key:
         try:
-            active_key = st.secrets["KIMI_API_KEY"]
+            active_key = st.secrets["OPENROUTER_API_KEY"]
         except Exception:
-            active_key = os.getenv("KIMI_API_KEY")
+            active_key = os.getenv("OPENROUTER_API_KEY")
 
     if not active_key:
         st.error(
-            "❌ Chưa tìm thấy `KIMI_API_KEY`!\n\n"
+            "❌ Chưa tìm thấy `OPENROUTER_API_KEY`!\n\n"
             "Vào Streamlit Cloud → Settings → Secrets và thêm:\n\n"
-            'KIMI_API_KEY = "sk-..."'
+            'OPENROUTER_API_KEY = "sk-or-v1-..."'
         )
         return None
 
     active_key = str(active_key).strip()
 
-    # 2. Endpoint & Headers của Moonshot AI (Kimi)
-    url = "https://api.moonshot.cn/v1/chat/completions"
+    # 2. Endpoint & Headers của OpenRouter
+    url = "https://openrouter.ai/api/v1/chat/completions"
     
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {active_key}"
+        "Authorization": f"Bearer {active_key}",
+        "HTTP-Referer": "https://streamlit.io",  # Tùy chọn để OpenRouter xếp hạng app
+        "X-Title": "MochiVocab App"             # Tùy chọn tên app
     }
 
+    # Chọn model mong muốn (Có thể đổi sang 'google/gemini-2.5-flash', 'meta-llama/llama-3.3-70b-instruct', hoặc 'deepseek/deepseek-chat')
     payload = {
-        "model": "moonshot-v1-8k",  # Model Kimi AI phổ biến & phản hồi nhanh
+        "model": "google/gemini-2.5-flash", 
         "messages": [
             {"role": "user", "content": prompt}
         ],
@@ -308,7 +311,7 @@ def call_llm_api(prompt, api_key=None):
             # Trích xuất nội dung trả về
             text = result["choices"][0]["message"]["content"].strip()
 
-            # Tự động lọc bỏ markdown code block (```json ... ```)
+            # Tự động bóc tách markdown block (```json ... ```) để parse dữ liệu an toàn
             if text.startswith("```"):
                 lines = text.splitlines()
                 if lines[0].startswith("```"):
@@ -320,75 +323,10 @@ def call_llm_api(prompt, api_key=None):
             return text
 
     except urllib.error.HTTPError as e:
-        st.error(f"❌ **Lỗi Kimi API (HTTP {e.code}):** {e.reason}")
+        st.error(f"❌ **Lỗi OpenRouter API (HTTP {e.code}):** {e.reason}")
         return None
     except Exception as e:
-        st.error(f"❌ **Lỗi Kimi API:** `{e}`")
-        return None
-
-    # =========================================================
-    # 5. BẮT LỖI CHI TIẾT
-    # =========================================================
-    except Exception as e:
-
-        error_message = str(e)
-
-        # API KEY
-        if (
-            "API key" in error_message
-            or "API_KEY" in error_message
-            or "401" in error_message
-            or "403" in error_message
-            or "PERMISSION_DENIED" in error_message
-        ):
-            st.error(
-                "🔑 **Gemini API Key có vấn đề.**\n\n"
-                "Hãy kiểm tra lại `GEMINI_API_KEY` trong "
-                "Streamlit Cloud → Settings → Secrets.\n\n"
-                f"Chi tiết: `{error_message}`"
-            )
-
-        # QUOTA
-        elif (
-            "429" in error_message
-            or "RESOURCE_EXHAUSTED" in error_message
-            or "quota" in error_message.lower()
-        ):
-            st.error(
-                "🚫 **Gemini API đã hết quota / bị giới hạn tốc độ.**\n\n"
-                f"Chi tiết: `{error_message}`"
-            )
-
-        # MODEL
-        elif (
-            "404" in error_message
-            or "NOT_FOUND" in error_message
-            or "model" in error_message.lower()
-        ):
-            st.error(
-                "🤖 **Không tìm thấy Gemini model.**\n\n"
-                "Model hiện đang sử dụng: `gemini-2.5-flash`\n\n"
-                f"Chi tiết: `{error_message}`"
-            )
-
-        # NETWORK
-        elif (
-            "timeout" in error_message.lower()
-            or "timed out" in error_message.lower()
-            or "connection" in error_message.lower()
-        ):
-            st.error(
-                "🌐 **Không thể kết nối tới Gemini API.**\n\n"
-                f"Chi tiết: `{error_message}`"
-            )
-
-        # OTHER
-        else:
-            st.error(
-                "❌ **Lỗi Gemini API:**\n\n"
-                f"`{error_message}`"
-            )
-
+        st.error(f"❌ **Lỗi OpenRouter API:** `{e}`")
         return None
 
 def fetch_llm_definitions_context(words_list, context_text=""):
