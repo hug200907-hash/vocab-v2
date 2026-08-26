@@ -253,12 +253,12 @@ def fetch_word_full_data(word):
 
 def call_llm_api(prompt, api_key=None):
     """
-    Gọi Gemini API sử dụng Key lưu sẵn trên Streamlit Secrets
+    Gọi Gemini API chuẩn hóa cho SDK google-genai trên Streamlit
     """
     import os
     from google import genai
 
-    # 1. Lấy API Key từ Secrets hoặc Parameter
+    # 1. Lấy API Key từ Secrets hoặc biến môi trường
     active_key = api_key
     if not active_key:
         try:
@@ -270,6 +270,39 @@ def call_llm_api(prompt, api_key=None):
         st.error("❌ Chưa tìm thấy `GEMINI_API_KEY` trong Streamlit Secrets!")
         return None
 
+    # Làm sạch chuỗi Key (tránh lỗi ký tự lạ/khoảng trắng)
+    active_key = str(active_key).strip()
+
+    # 2. Khởi tạo Client và gọi Model
+    try:
+        # Khởi tạo client truyền trực tiếp api_key
+        client = genai.Client(api_key=active_key)
+        
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+
+        if not response or not hasattr(response, "text"):
+            st.error("❌ Không nhận được phản hồi chữ từ Gemini.")
+            return None
+
+        clean_text = response.text.strip()
+
+        # Bóc tách Markdown block (```json ... ```)
+        if clean_text.startswith("```"):
+            lines = clean_text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            clean_text = "\n".join(lines).strip()
+
+        return clean_text
+
+    except Exception as e:
+        st.error(f"❌ Lỗi Gemini API: `{e}`")
+        return None
     # 2. Gọi API
     try:
         client = genai.Client(api_key=active_key)
