@@ -253,7 +253,7 @@ def fetch_word_full_data(word):
 
 def call_llm_api(prompt, api_key=None):
     """
-    Gọi OpenRouter API trực tiếp qua REST API (sử dụng urllib chuẩn)
+    Gọi OpenRouter API sử dụng Model Llama 3.3 70B Miễn phí
     """
     import os
     import json
@@ -284,14 +284,13 @@ def call_llm_api(prompt, api_key=None):
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {active_key}",
-        "HTTP-Referer": "https://streamlit.io",  # Tùy chọn để OpenRouter xếp hạng app
-        "X-Title": "MochiVocab App"             # Tùy chọn tên app
+        "HTTP-Referer": "https://streamlit.io",
+        "X-Title": "MochiVocab App"
     }
 
-    # Chọn model mong muốn (Có thể đổi sang 'google/gemini-2.5-flash', 'meta-llama/llama-3.3-70b-instruct', hoặc 'deepseek/deepseek-chat')
-    # Chọn model miễn phí (Thay 'google/gemini-2.5-flash' thành một trong các model free)
+    # Đã đổi sang model Llama 3.3 70B Free
     payload = {
-        "model": "meta-llama/llama-3.3-70b-instruct:free", # Hoặc "deepseek/deepseek-r1:free"
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
         "messages": [
             {"role": "user", "content": prompt}
         ],
@@ -312,7 +311,7 @@ def call_llm_api(prompt, api_key=None):
             # Trích xuất nội dung trả về
             text = result["choices"][0]["message"]["content"].strip()
 
-            # Tự động bóc tách markdown block (```json ... ```) để parse dữ liệu an toàn
+            # Tự động lọc bỏ markdown code block (```json ... ```) để parse dữ liệu an toàn
             if text.startswith("```"):
                 lines = text.splitlines()
                 if lines[0].startswith("```"):
