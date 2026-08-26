@@ -253,7 +253,7 @@ def fetch_word_full_data(word):
 
 def call_llm_api(prompt, api_key=None):
     """
-    Gọi OpenRouter API sử dụng Model Llama 3.3 70B Miễn phí
+    Gọi OpenRouter API với các Model Free ổn định nhất
     """
     import os
     import json
@@ -288,47 +288,61 @@ def call_llm_api(prompt, api_key=None):
         "X-Title": "MochiVocab App"
     }
 
-    # Đã đổi sang model Llama 3.3 70B Free
-    payload = {
-        "model": "meta-llama/llama-3.3-70b-instruct:free",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3
-    }
+    # Danh sách các model Miễn Phí (Free) ổn định nhất trên OpenRouter
+    free_models = [
+        "google/gemini-2.0-flash-lite-preview-02-05:free",
+        "stepfun/step-1-flash:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "deepseek/deepseek-r1:free"
+    ]
 
-    try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST"
-        )
+    for model_id in free_models:
+        payload = {
+            "model": model_id,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3
+        }
 
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            
-            # Trích xuất nội dung trả về
-            text = result["choices"][0]["message"]["content"].strip()
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST"
+            )
 
-            # Tự động lọc bỏ markdown code block (```json ... ```) để parse dữ liệu an toàn
-            if text.startswith("```"):
-                lines = text.splitlines()
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].startswith("```"):
-                    lines = lines[:-1]
-                text = "\n".join(lines).strip()
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                
+                # Trích xuất nội dung trả về
+                text = result["choices"][0]["message"]["content"].strip()
 
-            return text
+                # Tự động lọc bỏ markdown code block (```json ... ```)
+                if text.startswith("```"):
+                    lines = text.splitlines()
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].startswith("```"):
+                        lines = lines[:-1]
+                    text = "\n".join(lines).strip()
 
-    except urllib.error.HTTPError as e:
-        st.error(f"❌ **Lỗi OpenRouter API (HTTP {e.code}):** {e.reason}")
-        return None
-    except Exception as e:
-        st.error(f"❌ **Lỗi OpenRouter API:** `{e}`")
-        return None
+                return text
 
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                # Nếu model 404 thì bỏ qua thử model free tiếp theo trong danh sách
+                continue
+            else:
+                st.error(f"❌ **Lỗi OpenRouter API (HTTP {e.code}):** {e.reason}")
+                return None
+        except Exception as e:
+            st.error(f"❌ **Lỗi OpenRouter API:** `{e}`")
+            return None
+
+    st.error("❌ Các model free trên OpenRouter hiện đang bận hoặc không khả dụng. Vui lòng thử lại sau ít phút!")
+    return None
 def fetch_llm_definitions_context(words_list, context_text=""):
     """Dùng AI giải nghĩa và tạo ví dụ chuẩn 100% theo bài đọc"""
     prompt = f"""
