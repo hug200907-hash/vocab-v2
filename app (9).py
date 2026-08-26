@@ -253,55 +253,61 @@ def fetch_word_full_data(word):
 
 def call_llm_api(prompt, api_key=None):
     """
-    Gọi Gemini REST API trực tiếp bằng Access Token (AQ.Ab8RN6...)
+    Gọi OpenAI API (GPT-4o-mini) trực tiếp bằng thư viện urllib chuẩn.
     """
     import os
-    
-    # 1. Lấy Token từ Secrets
-    token = api_key
-    if not token:
-        try:
-            token = st.secrets["GEMINI_API_KEY"]
-        except Exception:
-            token = os.getenv("GEMINI_API_KEY")
+    import json
+    import urllib.request
 
-    if not token:
-        st.error("❌ Chưa tìm thấy `GEMINI_API_KEY` trong Secrets!")
+    # 1. Lấy API Key từ Secrets hoặc biến môi trường
+    active_key = api_key
+    if not active_key:
+        try:
+            active_key = st.secrets["OPENAI_API_KEY"]
+        except Exception:
+            active_key = os.getenv("OPENAI_API_KEY")
+
+    if not active_key:
+        st.error(
+            "❌ Chưa tìm thấy `OPENAI_API_KEY`!\n\n"
+            "Vào Streamlit Cloud → Settings → Secrets và thêm:\n\n"
+            'OPENAI_API_KEY = "sk-proj-..."'
+        )
         return None
 
-    token = str(token).strip()
+    active_key = str(active_key).strip()
 
-    # 2. Endpoint Gemini API
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-
+    # 2. Chuẩn bị request cho OpenAI API
+    url = "https://api.openai.com/v1/chat/completions"
+    
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}"  # Truyền dạng OAuth Bearer Token
+        "Authorization": f"Bearer {active_key}"
     }
 
     payload = {
-        "contents": [
-            {
-                "parts": [{"text": prompt}]
-            }
-        ]
+        "model": "gpt-4o-mini",  # Model tối ưu chi phí & tốc độ cao nhất của OpenAI hiện tại
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3
     }
 
     try:
         req = urllib.request.Request(
-            url, 
-            data=json.dumps(payload).encode("utf-8"), 
-            headers=headers, 
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
             method="POST"
         )
 
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             
-            # Trích xuất văn bản trả về
-            text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-            
-            # Làm sạch Markdown code block
+            # Trích xuất nội dung trả về
+            text = result["choices"][0]["message"]["content"].strip()
+
+            # Tự động lọc bỏ markdown code block (```json ... ```) để xử lý dữ liệu an toàn
             if text.startswith("```"):
                 lines = text.splitlines()
                 if lines[0].startswith("```"):
@@ -309,25 +315,12 @@ def call_llm_api(prompt, api_key=None):
                 if lines and lines[-1].startswith("```"):
                     lines = lines[:-1]
                 text = "\n".join(lines).strip()
-                
+
             return text
 
     except Exception as e:
-        st.error(f"❌ Lỗi Gemini API (OAuth Bearer): `{e}`")
+        st.error(f"❌ **Lỗi OpenAI API:** `{e}`")
         return None
-    # =========================================================
-    # 2. IMPORT SDK MỚI
-    # =========================================================
-    try:
-        from google import genai
-    except ImportError:
-        st.error(
-            "❌ Chưa cài thư viện Google GenAI.\n\n"
-            "Thêm dòng này vào requirements.txt:\n\n"
-            "google-genai"
-        )
-        return None
-
     # =========================================================
     # 3. KẾT NỐI GEMINI
     # =========================================================
