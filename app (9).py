@@ -289,8 +289,9 @@ def call_llm_api(prompt, api_key=None):
     }
 
     # Chọn model mong muốn (Có thể đổi sang 'google/gemini-2.5-flash', 'meta-llama/llama-3.3-70b-instruct', hoặc 'deepseek/deepseek-chat')
+    # Chọn model miễn phí (Thay 'google/gemini-2.5-flash' thành một trong các model free)
     payload = {
-        "model": "google/gemini-2.5-flash", 
+        "model": "meta-llama/llama-3.3-70b-instruct:free", # Hoặc "deepseek/deepseek-r1:free"
         "messages": [
             {"role": "user", "content": prompt}
         ],
