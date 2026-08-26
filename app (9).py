@@ -259,12 +259,10 @@ def call_llm_api(prompt, api_key=None):
         if not key:
             key = st.secrets["AQ.Ab8RN6JEtcT4QjQa4twbM-9eFWOTIRThjCF_7j-IA79KzsaWpg"]
 
-        client = genai.Client(
-            api_key=key
-        )
+        client = genai.Client(api_key=key)
 
         response = client.models.generate_content(
-            model="gemini-3.7-flash",
+            model="gemini-2.5-flash",
             contents=prompt
         )
 
