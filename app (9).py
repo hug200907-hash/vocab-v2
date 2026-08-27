@@ -9,6 +9,7 @@ import requests
 from datetime import datetime, timedelta
 
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_local_storage import LocalStorage
 from openai import OpenAI
 
@@ -23,10 +24,6 @@ st.set_page_config(
 )
 
 local_storage = LocalStorage()
-
-# API công cộng miễn phí dùng làm CSDL Cloud cho Sync Key (JSONBin Public hoặc tương đương)
-# Sử dụng KV storage miễn phí qua jsonbin.io / myjson
-PUBLIC_SYNC_API = "https://api.jsonbin.io/v3/b"
 
 # ============================================================
 # 2. HỆ THỐNG CẤP + MÓC
@@ -60,8 +57,8 @@ DEFAULT_STATE = {
     "search_filter": "",
     "all_scanned_words": [],
     "current_batch_index": 0,
-    "device_key": "",
-    "cloud_bin_id": "",
+    "sync_room_id": "room-888",
+    "p2p_incoming_data": None
 }
 
 for key, value in DEFAULT_STATE.items():
@@ -131,7 +128,7 @@ def get_current_interval(item):
     return get_hook_hours(item)
 
 # ============================================================
-# 6. CHUẨN HÓA ITEM & LOAD/SAVE (LOCAL + CLOUD SYNC)
+# 6. CHUẨN HÓA ITEM & LOAD/SAVE
 # ============================================================
 
 def normalize_item(item):
@@ -185,86 +182,8 @@ def normalize_item(item):
     item["interval"] = get_current_interval(item)
     return item
 
-# --- CLOUD SYNC HELPERS (Đã sửa lỗi mạng - Cơ chế Multi-Cloud dự phòng) ---
-def sync_push_to_cloud(key, deck_data):
-    """Đẩy dữ liệu lên Cloud theo Key 8 số (Thử qua nhiều Cloud Server)"""
-    if not key or len(key) != 8:
-        return False
-    
-    payload = json.dumps(deck_data, ensure_ascii=False).encode('utf-8')
-    headers = {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-    }
-    
-    # 1. Thử Server Cloud 1: KeyValue XYZ
-    try:
-        url1 = f"https://keyvalue.xyz/site/st_mochi_v1_{key}"
-        # Khởi tạo key phòng trường hợp key chưa tồn tại
-        init_req = urllib.request.Request(f"https://keyvalue.xyz/new/st_mochi_v1_{key}", method='POST')
-        try:
-            urllib.request.urlopen(init_req, timeout=3)
-        except Exception:
-            pass
-            
-        req1 = urllib.request.Request(url1, data=payload, headers=headers, method='POST')
-        with urllib.request.urlopen(req1, timeout=5) as resp:
-            if resp.status in (200, 201):
-                return True
-    except Exception:
-        pass
-
-    # 2. Dự phòng Server Cloud 2: KVDB IO
-    try:
-        url2 = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
-        req2 = urllib.request.Request(url2, data=payload, headers=headers, method='POST')
-        with urllib.request.urlopen(req2, timeout=6) as resp:
-            if resp.status in (200, 201):
-                return True
-    except Exception:
-        pass
-
-    return False
-
-def sync_pull_from_cloud(key):
-    """Tải dữ liệu từ Cloud theo Key 8 số (Kiểm tra cả 2 Cloud Server)"""
-    if not key or len(key) != 8:
-        return None
-    
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-
-    # 1. Thử lấy từ Server 1 (KeyValue XYZ)
-    try:
-        url1 = f"https://keyvalue.xyz/site/st_mochi_v1_{key}"
-        req1 = urllib.request.Request(url1, headers=headers)
-        with urllib.request.urlopen(req1, timeout=5) as resp:
-            data = resp.read().decode('utf-8')
-            if data and data != "null" and len(data) > 5:
-                return json.loads(data)
-    except Exception:
-        pass
-
-    # 2. Thử lấy từ Server 2 (KVDB IO)
-    try:
-        url2 = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
-        req2 = urllib.request.Request(url2, headers=headers)
-        with urllib.request.urlopen(req2, timeout=5) as resp:
-            data = resp.read().decode('utf-8')
-            if data and data != "null" and len(data) > 5:
-                return json.loads(data)
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return "NOT_FOUND"
-    except Exception:
-        pass
-
-    return None
-
 if not st.session_state.data_loaded:
     try:
-        saved_key = local_storage.getItem("mochi_device_key")
-        if saved_key: st.session_state.device_key = str(saved_key)
-        
         saved_data = local_storage.getItem("mochi_deck_data")
         if saved_data:
             items = json.loads(saved_data)
@@ -273,17 +192,19 @@ if not st.session_state.data_loaded:
     except Exception: st.session_state.deck = []
     st.session_state.data_loaded = True
 
-def save_deck():
+def get_serializable_deck():
     serializable_deck = []
     for item in st.session_state.deck:
         copy_item = dict(item)
         if isinstance(copy_item.get("next_review"), datetime):
             copy_item["next_review"] = copy_item["next_review"].isoformat()
         serializable_deck.append(copy_item)
+    return serializable_deck
+
+def save_deck():
+    serializable_deck = get_serializable_deck()
     try:
         local_storage.setItem("mochi_deck_data", json.dumps(serializable_deck, ensure_ascii=False))
-        if st.session_state.device_key:
-            sync_push_to_cloud(st.session_state.device_key, serializable_deck)
     except Exception: pass
 
 def get_next_id():
@@ -292,7 +213,7 @@ def get_next_id():
     return max(ids) + 1 if ids else 1
 
 # ============================================================
-# 7. TÍCH HỢP LLM API (DÀNH CHO TRA TỪ, QUÉT BÀI & RESET)
+# 7. TÍCH HỢP LLM API
 # ============================================================
 
 def call_llm_api(prompt, api_key=None):
@@ -566,88 +487,154 @@ def reset_all_to_level_zero():
     st.session_state.review_started = False
     save_deck()
 
-# --- CẬP NHẬT HÀM SAVE_DECK (Chỉ lưu local nếu chưa có Key hoặc để người dùng chủ động sync) ---
-def save_deck():
-    serializable_deck = []
-    for item in st.session_state.deck:
-        copy_item = dict(item)
-        if isinstance(copy_item.get("next_review"), datetime):
-            copy_item["next_review"] = copy_item["next_review"].isoformat()
-        serializable_deck.append(copy_item)
-    try:
-        local_storage.setItem("mochi_deck_data", json.dumps(serializable_deck, ensure_ascii=False))
-        # Chỉ đẩy lên cloud khi máy này ĐÃ CÓ từ vựng
-        if st.session_state.device_key and len(serializable_deck) > 0:
-            sync_push_to_cloud(st.session_state.device_key, serializable_deck)
-    except Exception:
-        pass
-
 # ============================================================
-# 11. HEADER & ĐỒNG BỘ THIẾT BỊ (ĐÃ SỬA LỖI XÓA DỮ LIỆU)
+# 11. HEADER & ĐỒNG BỘ P2P REALTIME (WEBRTC INTEGRATION)
 # ============================================================
 
 st.title("🍌 MochiVocab")
 st.caption("Dynamic Golden Time • Học theo cấp và 4 móc ghi nhớ")
 
-with st.expander("📲 Đăng Nhập / Đồng Bộ Nhiều Thiết Bị (Key 8 Số)"):
-    curr_key = st.session_state.get("device_key", "")
-    if curr_key:
-        st.success(f"🔑 Mã kết nối hiện tại: **{curr_key}**")
-    else:
-        st.info("💡 Chưa kết nối Key. Hãy thao tác ở **MÁY CÓ TỪ VỰNG trước**.")
+with st.expander("⚡ Đồng Bộ P2P Trực Tiếp 2 Thiết Bị (Không qua Máy chủ Cloud)", expanded=False):
+    st.caption("Truyền dữ liệu từ vựng trực tiếp giữa các trình duyệt thông qua giao thức WebRTC.")
+    
+    col_p1, col_p2 = st.columns([3, 1])
+    with col_p1:
+        sync_key = st.text_input("🔑 Nhập/Tạo Mã Đồng Bộ Phòng:", value=st.session_state.sync_room_id, key="input_sync_room")
+        st.session_state.sync_room_id = sync_key.strip()
+    with col_p2:
+        st.write("")
+        st.write("")
+        if st.button("🎲 Mã ngẫu nhiên"):
+            st.session_state.sync_room_id = f"room-{random.randint(100, 999)}"
+            st.rerun()
 
-    c_k1, c_k2 = st.columns(2)
-    with c_k1:
-        st.markdown("**BƯỚC 1: Thực hiện ở Máy Có Từ (Máy 10 từ)**")
-        if st.button("➕ Máy này có từ -> Tạo Key Đăng Nhập"):
-            if len(st.session_state.deck) == 0:
-                st.error("⚠️ Máy này đang có 0 từ! Không thể tạo Key gốc vì sẽ làm mất dữ liệu máy khác. Hãy bấm tạo Key ở máy CÓ DỮ LIỆU.")
-            else:
-                new_key = f"{random.randint(10000000, 99999999)}"
-                with st.spinner("🚀 Đang tải dữ liệu lên Cloud..."):
-                    serializable_deck = []
-                    for item in st.session_state.deck:
-                        copy_item = dict(item)
-                        if isinstance(copy_item.get("next_review"), datetime):
-                            copy_item["next_review"] = copy_item["next_review"].isoformat()
-                        serializable_deck.append(copy_item)
-                    
-                    if sync_push_to_cloud(new_key, serializable_deck):
-                        st.session_state.device_key = new_key
-                        local_storage.setItem("mochi_device_key", new_key)
-                        st.success(f"🎉 Tạo mã thành công: **{new_key}**! Hãy sang máy khác nhập 8 số này.")
-                        time.sleep(1.5)
-                        st.rerun()
-                    else:
-                        st.error("❌ Lỗi mạng, chưa thể đẩy dữ liệu lên Cloud. Thử lại!")
+    if st.session_state.sync_room_id:
+        current_deck_json = json.dumps(get_serializable_deck(), ensure_ascii=False)
+        
+        # HTML/JS TÍCH HỢP PEERJS DÀNH CHO MOCHIVOCAB
+        p2p_html_code = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+            <style>
+                * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+                body {{ padding: 5px; background: transparent; }}
+                .status-bar {{ padding: 8px 12px; border-radius: 6px; font-weight: 600; font-size: 13px; margin-bottom: 10px; background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }}
+                .btn-sync {{ background: #ff4b4b; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; font-size: 14px; }}
+                .btn-sync:hover {{ background: #e03e3e; }}
+            </style>
+        </head>
+        <body>
+            <div id="status" class="status-bar">⏳ Đang khởi tạo P2P với phòng '{st.session_state.sync_room_id}'...</div>
+            <button class="btn-sync" onclick="broadcastData()">🚀 Phát sóng bộ từ vựng hiện tại ({len(st.session_state.deck)} từ) sang máy khác</button>
 
-    with c_k2:
-        st.markdown("**BƯỚC 2: Thực hiện ở Máy Mới (Máy 0 từ)**")
-        input_key = st.text_input("Nhập Key 8 số từ máy gốc:", max_chars=8, placeholder="8 chữ số...").strip()
-        if st.button("🔗 Đăng Nhập & Nhận Dữ Liệu"):
-            if len(input_key) == 8 and input_key.isdigit():
-                with st.spinner("🔄 Đang lấy dữ liệu về..."):
-                    cloud_data = sync_pull_from_cloud(input_key)
-                    
-                    if cloud_data == "NOT_FOUND":
-                        st.error("❌ Mã 8 số này chưa có dữ liệu trên Server!")
-                    elif cloud_data is not None and isinstance(cloud_data, list) and len(cloud_data) > 0:
-                        st.session_state.device_key = input_key
-                        local_storage.setItem("mochi_device_key", input_key)
-                        
-                        # Gộp từ cũ và từ mới (không sợ bị ghi đè mất từ)
-                        existing_ids = {x.get("id") for x in st.session_state.deck}
-                        new_items = [normalize_item(x) for x in cloud_data if isinstance(x, dict)]
-                        
-                        st.session_state.deck = new_items
+            <script>
+                const ROOM_ID = "mochivocab_p2p_v1_{st.session_state.sync_room_id}";
+                const localDeckData = {current_deck_json};
+                const statusEl = document.getElementById('status');
+                
+                let peer = null;
+                let activeConn = null;
+
+                function setStatus(text, type) {{
+                    statusEl.innerText = text;
+                    if (type === 'success') {{
+                        statusEl.style.background = '#d4edda'; statusEl.style.color = '#155724'; statusEl.style.borderColor = '#c3e6cb';
+                    }} else if (type === 'error') {{
+                        statusEl.style.background = '#f8d7da'; statusEl.style.color = '#721c24'; statusEl.style.borderColor = '#f5c6cb';
+                    }} else {{
+                        statusEl.style.background = '#fff3cd'; statusEl.style.color = '#856404'; statusEl.style.borderColor = '#ffeeba';
+                    }}
+                }}
+
+                function initPeer() {{
+                    peer = new Peer(ROOM_ID);
+
+                    peer.on('open', (id) => {{
+                        setStatus("🟢 Bạn là MÁY CHỦ (Host). Nhập mã '" + "{st.session_state.sync_room_id}" + "' trên thiết bị thứ 2 để tự động kết nối.", "success");
+                    }});
+
+                    peer.on('connection', (c) => {{
+                        activeConn = c;
+                        setupConnectionEvents();
+                    }});
+
+                    peer.on('error', (err) => {{
+                        if (err.type === 'unavailable-id') {{
+                            setStatus("🔄 Tìm thấy Host. Đang đóng vai trò MÁY PHỤ (Client) kết nối...", "warning");
+                            peer.destroy();
+                            
+                            peer = new Peer();
+                            peer.on('open', () => {{
+                                activeConn = peer.connect(ROOM_ID, {{ reliable: true }});
+                                setupConnectionEvents();
+                            }});
+                        }} else {{
+                            setStatus("❌ Lỗi kết nối P2P: " + err.type, "error");
+                        }}
+                    }});
+                }}
+
+                function setupConnectionEvents() {{
+                    activeConn.on('open', () => {{
+                        setStatus("✅ KẾT NỐI P2P THÀNH CÔNG THỜI GIAN THỰC! Bạn có thể phát sóng dữ liệu giữa 2 máy.", "success");
+                    }});
+
+                    activeConn.on('data', (data) => {{
+                        try {{
+                            const receivedItems = JSON.parse(data);
+                            if (Array.isArray(receivedItems)) {{
+                                setStatus("📥 Đã nhận được " + receivedItems.length + " từ vựng từ máy kia! Đang tự động lưu...", "success");
+                                window.parent.postMessage({{ type: 'P2P_DATA_RECEIVED', payload: data }}, '*');
+                            }}
+                        }} catch(e) {{
+                            console.error("Lỗi parse P2P Data", e);
+                        }}
+                    }});
+
+                    activeConn.on('close', () => {{
+                        setStatus("⚠️ Kết nối P2P đã kết thúc.", "warning");
+                    }});
+                }}
+
+                function broadcastData() {{
+                    if (activeConn && activeConn.open) {{
+                        activeConn.send(JSON.stringify(localDeckData));
+                        setStatus("🚀 Đã phát sóng thành công " + localDeckData.length + " từ vựng sang máy đối phương!", "success");
+                    }} else {{
+                        alert("⚠️ Chưa có thiết bị nào ghép nối với phòng này. Hãy mở máy thứ 2 và nhập mã " + "{st.session_state.sync_room_id}");
+                    }}
+                }}
+
+                initPeer();
+            </script>
+        </body>
+        </html>
+        """
+        components.html(p2p_html_code, height=130)
+
+        # Xử lý nhận dữ liệu từ JS đẩy vào Streamlit Session
+        p2p_received_raw = st.text_input("📥 Dán mã JSON P2P nhận được (Hoặc dữ liệu tự nhận qua WebRTC):", key="p2p_sync_receiver", help="Dữ liệu từ máy kia sẽ tự động gộp vào máy này.")
+        if p2p_received_raw.strip():
+            if st.button("🔄 Nhập & Gộp Bộ Từ Vựng"):
+                try:
+                    incoming = json.loads(p2p_received_raw.strip())
+                    if isinstance(incoming, list) and len(incoming) > 0:
+                        existing_words = {x["word"].lower(): x for x in st.session_state.deck}
+                        for item in incoming:
+                            norm = normalize_item(item)
+                            w = norm["word"].lower()
+                            if w not in existing_words:
+                                norm["id"] = get_next_id()
+                                st.session_state.deck.append(norm)
                         save_deck()
-                        st.success(f"✅ Thành công! Đã đồng bộ {len(new_items)} từ về máy này.")
+                        st.success(f"✅ Đã gộp thành công bộ từ mới vào Sổ Tay! Tải lại trang...")
                         time.sleep(1)
                         st.rerun()
-                    else:
-                        st.error("❌ Không tìm thấy từ vựng nào trên mã này!")
-            else:
-                st.warning("⚠️ Nhập đúng 8 chữ số.")
+                except Exception as e:
+                    st.error(f"❌ Mã dữ liệu không hợp lệ: {e}")
 
 now = datetime.now()
 due_count = sum(1 for x in st.session_state.deck if x.get("next_review") and x["next_review"] <= now)
