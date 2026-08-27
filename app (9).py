@@ -235,17 +235,17 @@ def call_llm_api(prompt, api_key=None):
     try:
         # Cấu hình client tương thích OpenRouter
         client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",[cite: 2]
-            api_key=active_key.strip(),[cite: 2]
+            base_url="https://openrouter.ai/api/v1",
+            api_key=active_key.strip(),
         )
 
-        response = client.chat.completions.create([cite: 2]
+        response = client.chat.completions.create(
             model="minimax/minimax-m3:free",
-            messages=[{"role": "user", "content": prompt}],[cite: 2]
+            messages=[{"role": "user", "content": prompt}],
         )
 
-        if response.choices and response.choices[0].message.content:[cite: 2]
-            content = response.choices[0].message.content[cite: 2]
+        if response.choices and response.choices[0].message.content:
+            content = response.choices[0].message.content
             # Loại bỏ markdown ```json ... ``` nếu AI trả về bọc trong code block
             cleaned = re.sub(r"^```(?:json)?\s*", "", content.strip(), flags=re.MULTILINE)
             cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE)
