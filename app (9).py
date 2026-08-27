@@ -185,62 +185,79 @@ def normalize_item(item):
     item["interval"] = get_current_interval(item)
     return item
 
-# --- CLOUD SYNC HELPERS (Dùng requests & API ổn định 100%) ---
+# --- CLOUD SYNC HELPERS (Đã sửa lỗi mạng - Cơ chế Multi-Cloud dự phòng) ---
 def sync_push_to_cloud(key, deck_data):
-    """Đẩy dữ liệu lên Cloud theo Key 8 số"""
+    """Đẩy dữ liệu lên Cloud theo Key 8 số (Thử qua nhiều Cloud Server)"""
     if not key or len(key) != 8:
         return False
     
-    # Dùng server API key-value chuyên dụng chống chặn IP
-    url = f"https://api.restful-api.dev/objects"
-    payload = {
-        "name": f"mochi_deck_{key}",
-        "data": {
-            "key": key,
-            "deck": deck_data
-        }
+    payload = json.dumps(deck_data, ensure_ascii=False).encode('utf-8')
+    headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
     }
     
-    headers = {"Content-Type": "application/json"}
-
-    for _ in range(2):
-        try:
-            # 1. Tìm xem key này đã tồn tại trên server chưa
-            search_url = f"https://api.restful-api.dev/objects"
-            res_search = requests.get(search_url, timeout=5)
-            
-            # Thêm/Cập nhật dữ liệu
-            res = requests.post(url, json=payload, headers=headers, timeout=8)
-            if res.status_code in (200, 201):
-                return True
-        except Exception as e:
-            time.sleep(0.5)
-            
-    # Phương án dự phòng 2: Sử dụng KVDB qua HTTP Requests
+    # 1. Thử Server Cloud 1: KeyValue XYZ
     try:
-        kv_url = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
-        res = requests.post(kv_url, data=json.dumps(deck_data, ensure_ascii=False).encode('utf-8'), timeout=8)
-        return res.status_code in (200, 201)
+        url1 = f"https://keyvalue.xyz/site/st_mochi_v1_{key}"
+        # Khởi tạo key phòng trường hợp key chưa tồn tại
+        init_req = urllib.request.Request(f"https://keyvalue.xyz/new/st_mochi_v1_{key}", method='POST')
+        try:
+            urllib.request.urlopen(init_req, timeout=3)
+        except Exception:
+            pass
+            
+        req1 = urllib.request.Request(url1, data=payload, headers=headers, method='POST')
+        with urllib.request.urlopen(req1, timeout=5) as resp:
+            if resp.status in (200, 201):
+                return True
     except Exception:
-        return False
+        pass
+
+    # 2. Dự phòng Server Cloud 2: KVDB IO
+    try:
+        url2 = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
+        req2 = urllib.request.Request(url2, data=payload, headers=headers, method='POST')
+        with urllib.request.urlopen(req2, timeout=6) as resp:
+            if resp.status in (200, 201):
+                return True
+    except Exception:
+        pass
+
+    return False
 
 def sync_pull_from_cloud(key):
-    """Tải dữ liệu từ Cloud theo Key 8 số"""
+    """Tải dữ liệu từ Cloud theo Key 8 số (Kiểm tra cả 2 Cloud Server)"""
     if not key or len(key) != 8:
         return None
-        
-    for _ in range(2):
-        try:
-            # Thử lấy qua KVDB
-            kv_url = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
-            res = requests.get(kv_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
-            if res.status_code == 200 and res.text:
-                return res.json()
-            elif res.status_code == 404:
-                return "NOT_FOUND"
-        except Exception:
-            time.sleep(0.5)
-            
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+
+    # 1. Thử lấy từ Server 1 (KeyValue XYZ)
+    try:
+        url1 = f"https://keyvalue.xyz/site/st_mochi_v1_{key}"
+        req1 = urllib.request.Request(url1, headers=headers)
+        with urllib.request.urlopen(req1, timeout=5) as resp:
+            data = resp.read().decode('utf-8')
+            if data and data != "null" and len(data) > 5:
+                return json.loads(data)
+    except Exception:
+        pass
+
+    # 2. Thử lấy từ Server 2 (KVDB IO)
+    try:
+        url2 = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
+        req2 = urllib.request.Request(url2, headers=headers)
+        with urllib.request.urlopen(req2, timeout=5) as resp:
+            data = resp.read().decode('utf-8')
+            if data and data != "null" and len(data) > 5:
+                return json.loads(data)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return "NOT_FOUND"
+    except Exception:
+        pass
+
     return None
 
 if not st.session_state.data_loaded:
