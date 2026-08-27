@@ -9,7 +9,7 @@ import requests
 from datetime import datetime, timedelta
 
 import streamlit as st
-import streamlit.components.v1 as components
+
 from streamlit_local_storage import LocalStorage
 from openai import OpenAI
 
@@ -282,7 +282,7 @@ def play_audio_script(word):
     window.speechSynthesis.speak(msg);
     </script>
     """
-    st.components.v1.html(js_code, height=0)
+    st.html(js_code)
 
 # ============================================================
 # 9. TẠO CÂU HỎI TĨNH CHO TAB ÔN TẬP
@@ -613,7 +613,7 @@ with st.expander("⚡ Đồng Bộ P2P Trực Tiếp 2 Thiết Bị (Không qua 
         </body>
         </html>
         """
-        components.html(p2p_html_code, height=130)
+        st.html(p2p_html_code)
 
         # Xử lý nhận dữ liệu từ JS đẩy vào Streamlit Session
         p2p_received_raw = st.text_input("📥 Dán mã JSON P2P nhận được (Hoặc dữ liệu tự nhận qua WebRTC):", key="p2p_sync_receiver", help="Dữ liệu từ máy kia sẽ tự động gộp vào máy này.")
@@ -689,7 +689,7 @@ if selected_tab == "⏰ Ôn Tập":
         st.info(f"⏰ Còn khoảng **{format_remaining(remaining)}**")
         remaining_seconds = max(0, int(remaining))
 
-        st.components.v1.html(
+        st.html(
             f"""
             <div style="text-align:center; background:#262730; color:#00FF66; padding:20px; border-radius:15px; margin-top:15px;">
                 <div style="font-size:13px; color:#AAAAAA; margin-bottom:8px;">THỜI ĐIỂM VÀNG TIẾP THEO</div>
@@ -713,8 +713,7 @@ if selected_tab == "⏰ Ôn Tập":
                 updateCountdown();
                 setInterval(updateCountdown, 1000);
             </script>
-            """,
-            height=120
+            """
         )
 
     else:
@@ -723,7 +722,7 @@ if selected_tab == "⏰ Ôn Tập":
             st.markdown("---")
             st.markdown("### 🧠 Sẵn sàng ôn tập?\nMochiVocab sẽ chọn một từ đang đến giờ và bắt đầu tính thời gian phản hồi.")
 
-            if st.button("▶️ BẮT ĐẦU ÔN TẬP", type="primary", use_container_width=True, key="start_review"):
+            if st.button("▶️ BẮT ĐẦU ÔN TẬP", type="primary", width="stretch", key="start_review"):
                 min_level = min(x.get("level", 0) for x in due_items)
                 candidates = [x for x in due_items if x.get("level", 0) == min_level]
                 item = random.choice(candidates)
@@ -942,7 +941,7 @@ elif selected_tab == "📄 Quét Bài Đọc":
     with col_b2:
         batch_size = st.selectbox("Số từ / Batch:", options=[10, 15, 20], index=0)
 
-    if st.button("🚀 AI Phân Tích & Lọc Từ", type="primary", use_container_width=True):
+    if st.button("🚀 AI Phân Tích & Lọc Từ", type="primary", width="stretch"):
         if not input_text.strip():
             st.warning("⚠️ Vui lòng dán bài đọc trước khi phân tích!")
         else:
@@ -1023,7 +1022,7 @@ Chỉ trả về JSON thô.
                 item['meaning'] = meaning_val
             final_list.append(item)
 
-        if st.button("💾 LƯU BATCH NÀY VÀO SỔ TAY", type="primary", use_container_width=True):
+        if st.button("💾 LƯU BATCH NÀY VÀO SỔ TAY", type="primary", width="stretch"):
             saved_count = 0
             for item in final_list:
                 if item["meaning"].strip():
@@ -1112,7 +1111,7 @@ elif selected_tab == "📋 Sổ Tay":
                 "Tiếp theo": status,
             })
 
-        st.dataframe(table_data, use_container_width=True, hide_index=True)
+        st.dataframe(table_data, width="stretch", hide_index=True)
 
         st.markdown("---")
 
@@ -1172,7 +1171,7 @@ Trả về duy nhất JSON:
         st.markdown("---")
 
         st.markdown("### 🤖 AI Reset Lại Nghĩa & Ví Dụ Cho Toàn Bộ Sổ Tay")
-        if st.button("⚡ AI RESET LẠI TOÀN BỘ SỔ TAY", type="primary", use_container_width=True, key="ai_bulk_reset"):
+        if st.button("⚡ AI RESET LẠI TOÀN BỘ SỔ TAY", type="primary", width="stretch", key="ai_bulk_reset"):
             with st.spinner("🤖 AI đang làm mới nghĩa và ví dụ cho toàn bộ từ..."):
                 all_words = [x["word"] for x in st.session_state.deck]
                 prompt_bulk = f"""
@@ -1216,7 +1215,7 @@ Chỉ trả về JSON thô.
 
         st.markdown("---")
 
-        if st.button("🔄 RESET ALL VỀ CẤP 0", use_container_width=True, key="reset_all_words"):
+        if st.button("🔄 RESET ALL VỀ CẤP 0", width="stretch", key="reset_all_words"):
             reset_all_to_level_zero()
             st.success("✅ Đã reset toàn bộ từ về Cấp 0.")
             time.sleep(0.5)
