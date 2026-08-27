@@ -537,12 +537,17 @@ if st.session_state.sync_room_id:
                 let peer = null;
                 let activeConn = null;
 
-                const peerConfig = {{
+                const peerOptions = {{
+                    host: '0.peerjs.com',
+                    port: 443,
+                    path: '/',
+                    secure: true,
                     debug: 1,
                     config: {{
                         iceServers: [
                             {{ urls: 'stun:stun.l.google.com:19302' }},
-                            {{ urls: 'stun:stun1.l.google.com:19302' }}
+                            {{ urls: 'stun:stun1.l.google.com:19302' }},
+                            {{ urls: 'stun:stun2.l.google.com:19302' }}
                         ]
                     }}
                 }};
@@ -561,12 +566,12 @@ if st.session_state.sync_room_id:
                 function initPeer() {{
                     if (typeof Peer === 'undefined') {{
                         setStatus("⏳ Đang tải thư viện P2P...", "warning");
-                        setTimeout(initPeer, 500);
+                        setTimeout(initPeer, 300);
                         return;
                     }}
 
                     try {{
-                        peer = new Peer(ROOM_ID, peerConfig);
+                        peer = new Peer(ROOM_ID, peerOptions);
 
                         peer.on('open', (id) => {{
                             setStatus("🟢 Bạn là MÁY CHỦ (Host). Nhập mã '{st.session_state.sync_room_id}' trên máy thứ 2 để ghép nối.", "success");
@@ -578,21 +583,22 @@ if st.session_state.sync_room_id:
                         }});
 
                         peer.on('error', (err) => {{
+                            console.warn("PeerJS Error:", err.type);
                             if (err.type === 'unavailable-id') {{
-                                setStatus("🔄 Đã có Host. Đang kết nối với vai trò MÁY PHỤ...", "warning");
+                                setStatus("🔄 Đã tìm thấy Máy Chủ. Đang kết nối ghép nối...", "warning");
                                 if (peer) peer.destroy();
                                 
-                                peer = new Peer(peerConfig);
+                                peer = new Peer(peerOptions);
                                 peer.on('open', () => {{
                                     activeConn = peer.connect(ROOM_ID, {{ reliable: true }});
                                     setupConnectionEvents();
                                 }});
                             }} else {{
-                                setStatus("❌ Lỗi P2P (" + err.type + "): Kiểm tra lại mạng hoặc thử bấm mã ngẫu nhiên mới.", "error");
+                                setStatus("❌ Không thể nối Server P2P (" + err.type + "). Thử bấm '🎲 Mã ngẫu nhiên' để tạo phòng mới!", "error");
                             }}
                         }});
                     }} catch (e) {{
-                        setStatus("❌ Lỗi khởi tạo: " + e.message, "error");
+                        setStatus("❌ Lỗi mạng P2P: " + e.message, "error");
                     }}
                 }}
 
@@ -608,15 +614,9 @@ if st.session_state.sync_room_id:
                             const receivedItems = JSON.parse(data);
                             if (Array.isArray(receivedItems)) {{
                                 setStatus("📥 Đã nhận " + receivedItems.length + " từ vựng! Hãy dán/kiểm tra ở ô bên dưới.", "success");
-                                const inputEl = window.parent.document.querySelector('input[aria-label*="p2p_sync_receiver"]') || 
-                                                window.parent.document.querySelector('input[data-testid="stTextInput"]');
-                                if (inputEl) {{
-                                    inputEl.value = data;
-                                    inputEl.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                }}
                             }}
                         }} catch(e) {{
-                            console.error("Lỗi parse dữ liệu", e);
+                            console.error("Lỗi parse dữ liệu P2P", e);
                         }}
                     }});
 
@@ -630,12 +630,11 @@ if st.session_state.sync_room_id:
                         activeConn.send(JSON.stringify(localDeckData));
                         setStatus("🚀 Đã phát sóng thành công " + localDeckData.length + " từ sang máy đối phương!", "success");
                     }} else {{
-                        alert("⚠️ Chưa có thiết bị nào kết nối vào phòng '{st.session_state.sync_room_id}'. Hãy mở máy thứ 2 và nhập cùng mã phòng này.");
+                        alert("⚠️ Chưa có thiết bị nào ghép nối với phòng '{st.session_state.sync_room_id}'. Vui lòng mở trang này trên máy thứ 2 và nhập đúng mã phòng!");
                     }}
                 }}
 
-                window.addEventListener('load', initPeer);
-                if (document.readyState === 'complete') initPeer();
+                setTimeout(initPeer, 200);
             </script>
         </body>
         </html>
