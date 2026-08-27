@@ -3,5 +3,6 @@ streamlit
 streamlit-local-storage
 streamlit-autorefresh
 google-genai
+openai
 requests
 
