@@ -5,6 +5,7 @@ import os
 import re
 import urllib.parse
 import urllib.request
+import requests
 from datetime import datetime, timedelta
 
 import streamlit as st
