@@ -184,26 +184,30 @@ def normalize_item(item):
     item["interval"] = get_current_interval(item)
     return item
 
-# --- CLOUD SYNC HELPERS ---
+# --- CLOUD SYNC HELPERS (Dùng KVDB.io ổn định & tự động khởi tạo Key) ---
 def sync_push_to_cloud(key, deck_data):
     """Đẩy dữ liệu lên Cloud theo Key 8 số"""
-    if not key or len(key) != 8: return False
+    if not key or len(key) != 8:
+        return False
     try:
-        url = f"https://api.keyvalue.xyz/set/{key}"
-        data_str = json.dumps(deck_data, ensure_ascii=False)
-        req = urllib.request.Request(url, data=data_str.encode('utf-8'), headers={'Content-Type': 'text/plain'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return resp.status == 200
-    except Exception:
+        # Sử dụng API KVDB với Prefix riêng để không lo trùng với app khác
+        url = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
+        data_bytes = json.dumps(deck_data, ensure_ascii=False).encode('utf-8')
+        req = urllib.request.Request(url, data=data_bytes, method='POST')
+        req.add_header('Content-Type', 'application/json')
+        with urllib.request.urlopen(req, timeout=7) as resp:
+            return resp.status in (200, 201)
+    except Exception as e:
         return False
 
 def sync_pull_from_cloud(key):
     """Tải dữ liệu từ Cloud theo Key 8 số"""
-    if not key or len(key) != 8: return None
+    if not key or len(key) != 8:
+        return None
     try:
-        url = f"https://api.keyvalue.xyz/get/{key}"
+        url = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=7) as resp:
             data = resp.read().decode('utf-8')
             if data:
                 return json.loads(data)
