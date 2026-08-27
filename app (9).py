@@ -508,11 +508,10 @@ with st.expander("⚡ Đồng Bộ P2P Trực Tiếp 2 Thiết Bị (Không qua 
             st.session_state.sync_room_id = f"room-{random.randint(100, 999)}"
             st.rerun()
 
-    if st.session_state.sync_room_id:
+if st.session_state.sync_room_id:
         current_deck_json = json.dumps(get_serializable_deck(), ensure_ascii=False)
         
-        # HTML/JS TÍCH HỢP PEERJS DÀNH CHO MOCHIVOCAB
-       p2p_html_code = f"""
+        p2p_html_code = f"""
         <!DOCTYPE html>
         <html>
         <head>
@@ -641,6 +640,7 @@ with st.expander("⚡ Đồng Bộ P2P Trực Tiếp 2 Thiết Bị (Không qua 
         </body>
         </html>
         """
+        st.html(p2p_html_code)
         st.html(p2p_html_code)
 
         # Xử lý nhận dữ liệu từ JS đẩy vào Streamlit Session
