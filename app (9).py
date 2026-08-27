@@ -533,51 +533,88 @@ def reset_all_to_level_zero():
     st.session_state.review_started = False
     save_deck()
 
+# --- CẬP NHẬT HÀM SAVE_DECK (Chỉ lưu local nếu chưa có Key hoặc để người dùng chủ động sync) ---
+def save_deck():
+    serializable_deck = []
+    for item in st.session_state.deck:
+        copy_item = dict(item)
+        if isinstance(copy_item.get("next_review"), datetime):
+            copy_item["next_review"] = copy_item["next_review"].isoformat()
+        serializable_deck.append(copy_item)
+    try:
+        local_storage.setItem("mochi_deck_data", json.dumps(serializable_deck, ensure_ascii=False))
+        # Chỉ đẩy lên cloud khi máy này ĐÃ CÓ từ vựng
+        if st.session_state.device_key and len(serializable_deck) > 0:
+            sync_push_to_cloud(st.session_state.device_key, serializable_deck)
+    except Exception:
+        pass
+
 # ============================================================
-# 11. HEADER & DỒNG BỘ THIẾT BỊ (KEY 8 SỐ)
+# 11. HEADER & ĐỒNG BỘ THIẾT BỊ (ĐÃ SỬA LỖI XÓA DỮ LIỆU)
 # ============================================================
 
 st.title("🍌 MochiVocab")
 st.caption("Dynamic Golden Time • Học theo cấp và 4 móc ghi nhớ")
 
-# --- EXPANDER ĐĂNG NHẬP / CHIA SẺ KEY 8 SỐ ---
-with st.expander("📲 Đăng Nhập / Đồng Bộ NhIều Thiết Bị (Key 8 Số)"):
+with st.expander("📲 Đăng Nhập / Đồng Bộ Nhiều Thiết Bị (Key 8 Số)"):
     curr_key = st.session_state.get("device_key", "")
     if curr_key:
-        st.success(f"🔑 Mã kết nối thiết bị của bạn: **{curr_key}**")
-        st.caption("Dùng 8 số này nhập vào máy khác để sài chung dữ liệu.")
+        st.success(f"🔑 Mã kết nối hiện tại: **{curr_key}**")
     else:
-        st.info("💡 Chưa kết nối Key đồng bộ. Bạn có thể Tạo Key mới hoặc nhập Key từ máy khác.")
+        st.info("💡 Chưa kết nối Key. Hãy thao tác ở **MÁY CÓ TỪ VỰNG trước**.")
 
     c_k1, c_k2 = st.columns(2)
     with c_k1:
-        if st.button("➕ Tạo Key 8 Số Mới (Máy này làm gốc)"):
-            new_key = f"{random.randint(10000000, 99999999)}"
-            st.session_state.device_key = new_key
-            local_storage.setItem("mochi_device_key", new_key)
-            save_deck()
-            st.success(f"🎉 Đã tạo Key: **{new_key}**. Lưu giữ mã này để nhập ở máy khác!")
-            time.sleep(1)
-            st.rerun()
-
-    with c_k2:
-        input_key = st.text_input("Nhập Key 8 số từ máy khác:", max_chars=8, placeholder="8 chữ số...").strip()
-        if st.button("🔗 Đăng Nhập & Đồng Bộ"):
-            if len(input_key) == 8 and input_key.isdigit():
-                with st.spinner("🔄 Đang tải dữ liệu từ Cloud..."):
-                    cloud_data = sync_pull_from_cloud(input_key)
-                    if cloud_data is not None:
-                        st.session_state.device_key = input_key
-                        local_storage.setItem("mochi_device_key", input_key)
-                        st.session_state.deck = [normalize_item(x) for x in cloud_data if isinstance(x, dict)]
-                        save_deck()
-                        st.success("✅ Kết nối thành công! Đã tải dữ liệu về máy.")
-                        time.sleep(0.8)
+        st.markdown("**BƯỚC 1: Thực hiện ở Máy Có Từ (Máy 10 từ)**")
+        if st.button("➕ Máy này có từ -> Tạo Key Đăng Nhập"):
+            if len(st.session_state.deck) == 0:
+                st.error("⚠️ Máy này đang có 0 từ! Không thể tạo Key gốc vì sẽ làm mất dữ liệu máy khác. Hãy bấm tạo Key ở máy CÓ DỮ LIỆU.")
+            else:
+                new_key = f"{random.randint(10000000, 99999999)}"
+                with st.spinner("🚀 Đang tải dữ liệu lên Cloud..."):
+                    serializable_deck = []
+                    for item in st.session_state.deck:
+                        copy_item = dict(item)
+                        if isinstance(copy_item.get("next_review"), datetime):
+                            copy_item["next_review"] = copy_item["next_review"].isoformat()
+                        serializable_deck.append(copy_item)
+                    
+                    if sync_push_to_cloud(new_key, serializable_deck):
+                        st.session_state.device_key = new_key
+                        local_storage.setItem("mochi_device_key", new_key)
+                        st.success(f"🎉 Tạo mã thành công: **{new_key}**! Hãy sang máy khác nhập 8 số này.")
+                        time.sleep(1.5)
                         st.rerun()
                     else:
-                        st.error("❌ Key này chưa có dữ liệu hoặc không tồn tại!")
+                        st.error("❌ Lỗi mạng, chưa thể đẩy dữ liệu lên Cloud. Thử lại!")
+
+    with c_k2:
+        st.markdown("**BƯỚC 2: Thực hiện ở Máy Mới (Máy 0 từ)**")
+        input_key = st.text_input("Nhập Key 8 số từ máy gốc:", max_chars=8, placeholder="8 chữ số...").strip()
+        if st.button("🔗 Đăng Nhập & Nhận Dữ Liệu"):
+            if len(input_key) == 8 and input_key.isdigit():
+                with st.spinner("🔄 Đang lấy dữ liệu về..."):
+                    cloud_data = sync_pull_from_cloud(input_key)
+                    
+                    if cloud_data == "NOT_FOUND":
+                        st.error("❌ Mã 8 số này chưa có dữ liệu trên Server!")
+                    elif cloud_data is not None and isinstance(cloud_data, list) and len(cloud_data) > 0:
+                        st.session_state.device_key = input_key
+                        local_storage.setItem("mochi_device_key", input_key)
+                        
+                        # Gộp từ cũ và từ mới (không sợ bị ghi đè mất từ)
+                        existing_ids = {x.get("id") for x in st.session_state.deck}
+                        new_items = [normalize_item(x) for x in cloud_data if isinstance(x, dict)]
+                        
+                        st.session_state.deck = new_items
+                        save_deck()
+                        st.success(f"✅ Thành công! Đã đồng bộ {len(new_items)} từ về máy này.")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("❌ Không tìm thấy từ vựng nào trên mã này!")
             else:
-                st.warning("⚠️ Vui lòng nhập đúng 8 chữ số.")
+                st.warning("⚠️ Nhập đúng 8 chữ số.")
 
 now = datetime.now()
 due_count = sum(1 for x in st.session_state.deck if x.get("next_review") and x["next_review"] <= now)
