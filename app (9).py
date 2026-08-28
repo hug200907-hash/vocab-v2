@@ -1,17 +1,16 @@
-import base64
 import json
-import os
 import random
-import re
 import time
+import os
+import re
 import urllib.parse
 import urllib.request
+import requests
 from datetime import datetime, timedelta
 
-from openai import OpenAI
-import requests
 import streamlit as st
 from streamlit_local_storage import LocalStorage
+from openai import OpenAI
 
 # ============================================================
 # 1. CẤU HÌNH APP & LOCAL STORAGE
@@ -26,6 +25,7 @@ st.set_page_config(
 local_storage = LocalStorage()
 
 # API công cộng miễn phí dùng làm CSDL Cloud cho Sync Key (JSONBin Public hoặc tương đương)
+# Sử dụng KV storage miễn phí qua jsonbin.io / myjson
 PUBLIC_SYNC_API = "https://api.jsonbin.io/v3/b"
 
 # ============================================================
@@ -185,7 +185,9 @@ def normalize_item(item):
     item["interval"] = get_current_interval(item)
     return item
 
+# --- CLOUD SYNC HELPERS (Đã sửa lỗi mạng - Cơ chế Multi-Cloud dự phòng) ---
 def sync_push_to_cloud(key, deck_data):
+    """Đẩy dữ liệu lên Cloud theo Key 8 số (Thử qua nhiều Cloud Server)"""
     if not key or len(key) != 8:
         return False
     
@@ -195,8 +197,10 @@ def sync_push_to_cloud(key, deck_data):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
     }
     
+    # 1. Thử Server Cloud 1: KeyValue XYZ
     try:
         url1 = f"https://keyvalue.xyz/site/st_mochi_v1_{key}"
+        # Khởi tạo key phòng trường hợp key chưa tồn tại
         init_req = urllib.request.Request(f"https://keyvalue.xyz/new/st_mochi_v1_{key}", method='POST')
         try:
             urllib.request.urlopen(init_req, timeout=3)
@@ -210,6 +214,7 @@ def sync_push_to_cloud(key, deck_data):
     except Exception:
         pass
 
+    # 2. Dự phòng Server Cloud 2: KVDB IO
     try:
         url2 = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
         req2 = urllib.request.Request(url2, data=payload, headers=headers, method='POST')
@@ -222,11 +227,13 @@ def sync_push_to_cloud(key, deck_data):
     return False
 
 def sync_pull_from_cloud(key):
+    """Tải dữ liệu từ Cloud theo Key 8 số (Kiểm tra cả 2 Cloud Server)"""
     if not key or len(key) != 8:
         return None
     
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
+    # 1. Thử lấy từ Server 1 (KeyValue XYZ)
     try:
         url1 = f"https://keyvalue.xyz/site/st_mochi_v1_{key}"
         req1 = urllib.request.Request(url1, headers=headers)
@@ -237,6 +244,7 @@ def sync_pull_from_cloud(key):
     except Exception:
         pass
 
+    # 2. Thử lấy từ Server 2 (KVDB IO)
     try:
         url2 = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
         req2 = urllib.request.Request(url2, headers=headers)
@@ -274,7 +282,7 @@ def save_deck():
         serializable_deck.append(copy_item)
     try:
         local_storage.setItem("mochi_deck_data", json.dumps(serializable_deck, ensure_ascii=False))
-        if st.session_state.device_key and len(serializable_deck) > 0:
+        if st.session_state.device_key:
             sync_push_to_cloud(st.session_state.device_key, serializable_deck)
     except Exception: pass
 
@@ -284,7 +292,7 @@ def get_next_id():
     return max(ids) + 1 if ids else 1
 
 # ============================================================
-# 7. TÍCH HỢP LLM API
+# 7. TÍCH HỢP LLM API (DÀNH CHO TRA TỪ, QUÉT BÀI & RESET)
 # ============================================================
 
 def call_llm_api(prompt, api_key=None):
@@ -353,8 +361,7 @@ def play_audio_script(word):
     window.speechSynthesis.speak(msg);
     </script>
     """
-    b64_js = base64.b64encode(js_code.encode("utf-8")).decode("utf-8")
-    st.iframe(f"data:text/html;base64,{b64_js}", width=0, height=0)
+    st.components.v1.html(js_code, height=0)
 
 # ============================================================
 # 9. TẠO CÂU HỎI TĨNH CHO TAB ÔN TẬP
@@ -559,63 +566,30 @@ def reset_all_to_level_zero():
     st.session_state.review_started = False
     save_deck()
 
+# --- CẬP NHẬT HÀM SAVE_DECK (Chỉ lưu local nếu chưa có Key hoặc để người dùng chủ động sync) ---
+def save_deck():
+    serializable_deck = []
+    for item in st.session_state.deck:
+        copy_item = dict(item)
+        if isinstance(copy_item.get("next_review"), datetime):
+            copy_item["next_review"] = copy_item["next_review"].isoformat()
+        serializable_deck.append(copy_item)
+    try:
+        local_storage.setItem("mochi_deck_data", json.dumps(serializable_deck, ensure_ascii=False))
+        # Chỉ đẩy lên cloud khi máy này ĐÃ CÓ từ vựng
+        if st.session_state.device_key and len(serializable_deck) > 0:
+            sync_push_to_cloud(st.session_state.device_key, serializable_deck)
+    except Exception:
+        pass
+
 # ============================================================
-# 11. HEADER & ĐỒNG BỘ THIẾT BỊ (ĐÃ SỬA SỬ DỤNG ST.IFRAME CHUẨN 2026)
+# 11. HEADER & ĐỒNG BỘ THIẾT BỊ (ĐÃ SỬA LỖI XÓA DỮ LIỆU)
 # ============================================================
 
 st.title("🍌 MochiVocab")
 st.caption("Dynamic Golden Time • Học theo cấp và 4 móc ghi nhớ")
 
-# Banner Đồng Bộ HTML được mã hóa Base64 và nhúng qua st.iframe
-sync_banner_html = """
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            margin: 0;
-            padding: 0;
-            background-color: transparent;
-        }
-        .sync-card {
-            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-            color: #ffffff;
-            padding: 16px 20px;
-            border-radius: 10px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-        }
-        .sync-title {
-            font-size: 16px;
-            font-weight: 600;
-            margin: 0 0 6px 0;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .sync-desc {
-            font-size: 13px;
-            opacity: 0.9;
-            margin: 0;
-            line-height: 1.4;
-        }
-    </style>
-</head>
-<body>
-    <div class="sync-card">
-        <div class="sync-title">📲 Đăng Nhập / Đồng Bộ Nhiều Thiết Bị (Key 8 Số)</div>
-        <p class="sync-desc">Đồng bộ dữ liệu học tập thông minh thời gian thực giữa điện thoại và máy tính của bạn.</p>
-    </div>
-</body>
-</html>
-"""
-
-# Render Banner Đồng bộ bằng st.iframe chuẩn
-b64_sync = base64.b64encode(sync_banner_html.encode("utf-8")).decode("utf-8")
-st.iframe(src=f"data:text/html;charset=utf-8;base64,{b64_sync}", width="stretch", height=95)
-
-with st.expander("🔑 Thao tác tạo & Nhập mã đồng bộ (Key 8 Số)"):
+with st.expander("📲 Đăng Nhập / Đồng Bộ Nhiều Thiết Bị (Key 8 Số)"):
     curr_key = st.session_state.get("device_key", "")
     if curr_key:
         st.success(f"🔑 Mã kết nối hiện tại: **{curr_key}**")
@@ -624,7 +598,7 @@ with st.expander("🔑 Thao tác tạo & Nhập mã đồng bộ (Key 8 Số)"):
 
     c_k1, c_k2 = st.columns(2)
     with c_k1:
-        st.markdown("**BƯỚC 1: Thực hiện ở Máy Có Từ**")
+        st.markdown("**BƯỚC 1: Thực hiện ở Máy Có Từ (Máy 10 từ)**")
         if st.button("➕ Máy này có từ -> Tạo Key Đăng Nhập"):
             if len(st.session_state.deck) == 0:
                 st.error("⚠️ Máy này đang có 0 từ! Không thể tạo Key gốc vì sẽ làm mất dữ liệu máy khác. Hãy bấm tạo Key ở máy CÓ DỮ LIỆU.")
@@ -661,6 +635,7 @@ with st.expander("🔑 Thao tác tạo & Nhập mã đồng bộ (Key 8 Số)"):
                         st.session_state.device_key = input_key
                         local_storage.setItem("mochi_device_key", input_key)
                         
+                        # Gộp từ cũ và từ mới (không sợ bị ghi đè mất từ)
                         existing_ids = {x.get("id") for x in st.session_state.deck}
                         new_items = [normalize_item(x) for x in cloud_data if isinstance(x, dict)]
                         
@@ -727,14 +702,9 @@ if selected_tab == "⏰ Ôn Tập":
         st.info(f"⏰ Còn khoảng **{format_remaining(remaining)}**")
         remaining_seconds = max(0, int(remaining))
 
-        countdown_html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-        </head>
-        <body style="margin:0; background:transparent;">
-            <div style="text-align:center; background:#262730; color:#00FF66; padding:20px; border-radius:15px;">
+        st.components.v1.html(
+            f"""
+            <div style="text-align:center; background:#262730; color:#00FF66; padding:20px; border-radius:15px; margin-top:15px;">
                 <div style="font-size:13px; color:#AAAAAA; margin-bottom:8px;">THỜI ĐIỂM VÀNG TIẾP THEO</div>
                 <div id="mochi-countdown" style="font-size:30px; font-weight:bold; font-family:monospace;">--:--:--</div>
             </div>
@@ -756,11 +726,9 @@ if selected_tab == "⏰ Ôn Tập":
                 updateCountdown();
                 setInterval(updateCountdown, 1000);
             </script>
-        </body>
-        </html>
-        """
-        b64_countdown = base64.b64encode(countdown_html.encode("utf-8")).decode("utf-8")
-        st.iframe(src=f"data:text/html;charset=utf-8;base64,{b64_countdown}", width="stretch", height=120)
+            """,
+            height=120
+        )
 
     else:
         if not st.session_state.review_started:
