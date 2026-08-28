@@ -52,6 +52,7 @@ LEVEL_SPEED = {
 
 MAX_LEVEL = 5
 HOOKS_PER_LEVEL = 4
+BATCH_SIZE = 20
 
 # ============================================================
 # 3. SESSION STATE
@@ -73,9 +74,14 @@ DEFAULT_STATE = {
     "sync_key": "",
     "auto_merge_neutral_preview": None,
     "auto_merge_neutral_undo_backup": None,
-    "show_answer_result": False, # Quản lý hiển thị màn hình kết quả trung gian
-    "result_data": {},          # Lưu trữ thông tin kết quả vừa trả lời
-    "tts_played_for_result": False # Đánh dấu chống lặp Autoplay khi Streamlit rerun
+    "show_answer_result": False,
+    "result_data": {},
+    "tts_played_for_result": False,
+    # Quản lý Batch AI Generation chống rerun
+    "example_generation_pending": False,
+    "example_generation_done": False,
+    "example_generation_session_id": None,
+    "modified_item_ids": set()
 }
 
 for key, value in DEFAULT_STATE.items():
@@ -84,15 +90,16 @@ for key, value in DEFAULT_STATE.items():
             st.session_state[key] = []
         elif isinstance(value, dict):
             st.session_state[key] = {}
+        elif isinstance(value, set):
+            st.session_state[key] = set()
         else:
             st.session_state[key] = value
 
 # ============================================================
-# 4. HÀM PHÁT ÂM (TTS) & TỐC ĐỘ THEO LEVEL (FIXED)
+# 4. HÀM PHÁT ÂM (TTS) & TỐC ĐỘ THEO LEVEL
 # ============================================================
 
 def get_pronunciation_speed(level):
-    """Lấy tốc độ đọc chuẩn dựa trên level của từ (1 -> 5)"""
     try:
         lvl = int(level)
     except Exception:
@@ -101,12 +108,6 @@ def get_pronunciation_speed(level):
     return LEVEL_SPEED.get(lvl, 1.0)
 
 def get_pronunciation_text(item, level):
-    """
-    Xác định nội dung phát âm dựa trên level:
-    - Level 1-4: Đọc TỪ (item["word"])
-    - Level 5: Đọc CẢ CÂU VÍ DỤ (item["example"])
-    Nếu Level 5 example rỗng -> Fallback về word
-    """
     try:
         lvl = int(level)
     except Exception:
@@ -119,10 +120,6 @@ def get_pronunciation_text(item, level):
         return item.get("word", "").strip()
 
 def fetch_tts_audio_bytes(text):
-    """
-    Tải trực tiếp MP3 Audio Bytes từ Google TTS Server phía Python backend.
-    Kiểm tra kĩ HTTP status, content-type và dung lượng audio.
-    """
     clean_text = str(text).strip()
     if not clean_text:
         return None
@@ -143,7 +140,6 @@ def fetch_tts_audio_bytes(text):
             content_type = response.headers.get("Content-Type", "")
             audio_bytes = response.read()
 
-            # Kiểm tra bytes và content-type hợp lệ
             if not audio_bytes or len(audio_bytes) < 500:
                 return None
             if "audio" not in content_type and "mpeg" not in content_type and "octet-stream" not in content_type:
@@ -154,10 +150,6 @@ def fetch_tts_audio_bytes(text):
         return None
 
 def speak_text(text, speed=1.0, auto_play=True, key_suffix=""):
-    """
-    Phát âm tiếng Anh chuẩn thông qua Streamlit Native Audio (st.audio).
-    Tuyệt đối không render audio rỗng, không dùng st.components.v1.html.
-    """
     if not text:
         return
 
@@ -167,17 +159,14 @@ def speak_text(text, speed=1.0, auto_play=True, key_suffix=""):
         st.warning("⚠️ Không thể tải file phát âm (Vui lòng kiểm tra mạng).")
         return
 
-    # Chuyển audio bytes thành Base64 Data URL ổn định
     audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
     audio_src = f"data:audio/mpeg;base64,{audio_b64}"
 
     st.markdown(f"🔊 **Phát âm ({speed}x)**")
-    
-    # Sử dụng st.audio Native của Streamlit
     st.audio(audio_src, format="audio/mp3", autoplay=auto_play)
 
 # ============================================================
-# 5. THUẬT TOÁN GỢI Ý (HINT) NGUYÊN ÂM THÔNG MINH
+# 5. THUẬT TOÁN GỢI Ý NGUYÊN ÂM
 # ============================================================
 
 VOWELS = set("aeiouyAEIOUY")
@@ -573,7 +562,7 @@ def merge_decks(local_deck, imported_deck):
     return final_deck, len(local_deck), len(imported_deck), duplicate_count, len(final_deck)
 
 # ============================================================
-# 9. TÍCH HỢP LLM API & ADAPTIVE EXAMPLE GENERATOR
+# 9. LLM API & BATCH ADAPTIVE EXAMPLE GENERATOR
 # ============================================================
 
 def call_llm_api(prompt, api_key=None):
@@ -600,62 +589,75 @@ def call_llm_api(prompt, api_key=None):
     except Exception:
         return None
 
-def map_level_to_target_audience(level):
-    try:
-        lvl = int(level)
-    except Exception:
-        lvl = 1
+def generate_adaptive_examples_batch(items):
+    """
+    Tạo câu ví dụ thích ứng theo BATCH (nhiều từ trong 1 request LLM API).
+    Trả về danh sách dict: [{'id': 123, 'example': '...'}, ...]
+    """
+    if not items:
+        return []
 
-    if lvl <= 1:
-        return "LEVEL 1/5 (Người mới/trẻ nhỏ): Câu rất ngắn, từ vựng cơ bản, cấu trúc đơn đơn giản, tình huống cụ thể dễ hình dung."
-    elif lvl == 2:
-        return "LEVEL 2/5 (Tiểu học): Vẫn dễ hiểu, dài hơn L1, thêm thời gian/nơi chốn/nguyên nhân đơn giản, có thể dùng and, but, because, when."
-    elif lvl == 3:
-        return "LEVEL 3/5 (THCS): Cấu trúc rõ ràng, dùng because, although, while, when, if, before, after, mệnh đề quan hệ đơn giản."
-    elif lvl == 4:
-        return "LEVEL 4/5 (THPT): Complex sentences, relative clauses, conditional structures, participle clauses khi phù hợp, diễn đạt ý phức tạp hơn."
-    else:
-        return "LEVEL 5/5 (Học thuật cao): Complex clauses, academic vocabulary, formal expressions, collocations, cấu trúc lồng nhau, ý tưởng trừu tượng nhưng vẫn tự nhiên."
+    formatted_items = []
+    for item in items:
+        formatted_items.append({
+            "id": item["id"],
+            "word": item["word"],
+            "meaning": item["meaning"],
+            "level": item["level"],
+            "hook": item["hook"],
+            "review_count": item["review_count"],
+            "correct_count": item["correct_count"],
+            "wrong_count": item["wrong_count"],
+            "last_result": item.get("last_result"),
+            "last_response_time": item.get("last_response_time"),
+            "previous_example": item.get("example", "")
+        })
 
-def generate_adaptive_example(item, new_level):
-    word = item.get("word", "").strip()
-    meaning = item.get("meaning", "").strip()
-    prev_example = item.get("example", "").strip()
-    audience_req = map_level_to_target_audience(new_level)
+    prompt = f"""Bạn là hệ thống tạo câu ví dụ tiếng Anh thích ứng cho ứng dụng học từ vựng.
 
-    prompt = f"""
-Bạn là chuyên gia biên soạn giáo trình tiếng Anh thích ứng (Adaptive Learning).
-Hãy tạo MỘT câu ví dụ tiếng Anh mới cho từ mục tiêu (target word).
+Hãy tạo câu ví dụ cho các từ dưới đây.
 
-THÔNG TIN TỪ MỤC TIÊU:
-- Target Word: "{word}" (Phải dùng chính xác từ này, không thay bằng synonym)
-- Nghĩa đang học: "{meaning}" (Giữ đúng nghĩa này, không đổi sang nghĩa khác)
-- Cấp độ yêu cầu: Level {new_level}/5
-- Yêu cầu độ khó: {audience_req}
-- Câu ví dụ cũ (previous_example): "{prev_example}"
+Mỗi câu phải:
+- sử dụng đúng từ mục tiêu
+- đúng nghĩa được cung cấp
+- phù hợp với level hiện tại của từ
+- phù hợp với lịch sử học của người dùng
+- tự nhiên như tiếng Anh thực tế
+- không quá dài
+- dễ hiểu đối với người học
+- nếu người học thường trả lời sai thì ưu tiên câu đơn giản, rõ nghĩa và có ngữ cảnh mạnh
+- nếu người học đã trả lời đúng nhiều lần thì có thể tăng độ tự nhiên hoặc độ phức tạp
+- không thay đổi nghĩa của từ
+- không tạo câu sáo rỗng hoặc không tự nhiên
 
-CÁC QUY TẮC BẮT BUỘC:
-1. TARGET WORD PHẢI ĐƯỢC DÙNG DÙNG ĐÚNG CHÍNH TẢ: "{word}".
-2. ĐỘ KHÓ PHẢI TĂNG/GIẢM BẰNG CHẤT LƯỢNG (Vocabulary, Grammar, Sentence structure, Logical relationships) đúng chuẩn Level {new_level}/5.
-3. KHÔNG TẠO EXAMPLE CHUNG CHUNG.
-4. KHÔNG LẶP LẠI EXAMPLE CỦA LẦN TRƯỚC.
+DỮ LIỆU:
 
-YÊU CẦU ĐẦU RA:
-Trả về DUY NHẤT JSON thô (không markdown, không giải thích):
-{{
-  "example": "Câu ví dụ tiếng Anh mới hoàn chỉnh ở đây"
-}}
-"""
+{json.dumps(formatted_items, ensure_ascii=False, indent=2)}
+
+Trả về JSON hợp lệ theo đúng format:
+
+[
+  {{
+    "id": 123,
+    "example": "..."
+  }},
+  {{
+    "id": 456,
+    "example": "..."
+  }}
+]
+
+Chỉ trả về JSON, không giải thích thêm."""
+
     res = call_llm_api(prompt)
     if res:
         try:
-            res_data = json.loads(res)
-            new_ex = res_data.get("example", "").strip()
-            if new_ex and len(new_ex) > 3:
-                return new_ex
+            results = json.loads(res)
+            if isinstance(results, list):
+                return results
         except Exception:
             pass
-    return None
+    return []
 
 # ============================================================
 # 10. TRA TỪ & DICTIONARY API
@@ -776,7 +778,7 @@ def prepare_review_question(item):
         st.session_state.q_data = {"word": word, "question": meaning, "options": options, "answer": word}
 
 # ============================================================
-# 12. TIẾN / LÙI MÓC & XỬ LÝ ĐÁP ÁN
+# 12. TIẾN / LÙI MÓC & XỬ LÝ ĐÁP ÁN (KHÔNG GỌI AI TRỰC TIẾP)
 # ============================================================
 
 def advance_after_correct(item):
@@ -810,6 +812,10 @@ def move_back_after_wrong(item):
     item["interval"] = get_current_interval(item)
 
 def process_answer(is_correct, correct_ans_text):
+    """
+    Xử lý đáp án tức thì: Cập nhật chỉ số, lịch ôn, lưu storage và hiển thị kết quả.
+    HOÀN TOÀN KHÔNG GỌI AI Ở ĐÂY để tránh người dùng phải chờ.
+    """
     item = st.session_state.review_item
     if item is None: return
 
@@ -840,10 +846,14 @@ def process_answer(is_correct, correct_ans_text):
     item["interval"] = new_interval_hours
     new_level = int(item["level"])
 
-    with st.spinner("🤖 AI đang điều chỉnh câu ví dụ theo trình độ..."):
-        new_example = generate_adaptive_example(item, new_level)
-        if new_example:
-            item["example"] = new_example
+    # Đánh dấu từ này đã vừa thay đổi dữ liệu học để tạo batch example sau phiên ôn
+    if "modified_item_ids" not in st.session_state:
+        st.session_state.modified_item_ids = set()
+    st.session_state.modified_item_ids.add(item["id"])
+
+    # Đánh dấu phiên ôn này cần generate khi kết thúc
+    st.session_state.example_generation_pending = True
+    st.session_state.example_generation_done = False
 
     save_deck()
 
@@ -853,12 +863,12 @@ def process_answer(is_correct, correct_ans_text):
         "word": item["word"],
         "phonetic": item.get("phonetic", ""),
         "meaning": item.get("meaning", ""),
-        "example": item.get("example", ""),
+        "example": item.get("example", ""), # Sử dụng câu ví dụ hiện tại (cũ)
         "level": new_level,
         "item": dict(item)
     }
     st.session_state.show_answer_result = True
-    st.session_state.tts_played_for_result = False # Reset cờ Autoplay cho kết quả mới
+    st.session_state.tts_played_for_result = False
     st.rerun()
 
 def reset_all_to_level_zero():
@@ -879,6 +889,9 @@ def reset_all_to_level_zero():
     st.session_state.review_started = False
     st.session_state.show_answer_result = False
     st.session_state.tts_played_for_result = False
+    st.session_state.modified_item_ids = set()
+    st.session_state.example_generation_pending = False
+    st.session_state.example_generation_done = False
     save_deck()
 
 # ============================================================
@@ -979,7 +992,7 @@ selected_tab = st.radio(
 st.markdown("---")
 
 # ============================================================
-# 14. TAB ÔN TẬP
+# 14. TAB ÔN TẬP (CẬP NHẬT BATCH EXAMPLES KHI KẾT THÚC)
 # ============================================================
 
 if selected_tab == "⏰ Ôn Tập":
@@ -997,6 +1010,45 @@ if selected_tab == "⏰ Ôn Tập":
         st.session_state.q_type = None
         st.session_state.q_data = {}
 
+        # ----------------------------------------------------
+        # KÍCH HOẠT HỆ THỐNG AI TẠO BATCH CÂU VÍ DỤ KHI HẾT TỪ ÔN
+        # ----------------------------------------------------
+        if st.session_state.get("example_generation_pending") and not st.session_state.get("example_generation_done"):
+            # Tìm các từ thực sự cần cập nhật example
+            modified_ids = st.session_state.get("modified_item_ids", set())
+            items_to_generate = [item for item in st.session_state.deck if item["id"] in modified_ids]
+
+            if items_to_generate:
+                st.success("🎉 Đã hoàn thành lượt ôn!")
+                with st.spinner(f"🤖 AI đang cập nhật câu ví dụ cho {len(items_to_generate)} từ vừa học..."):
+                    updated_total = 0
+
+                    # Phân batch tối đa BATCH_SIZE (20) từ / 1 API request
+                    for i in range(0, len(items_to_generate), BATCH_SIZE):
+                        batch = items_to_generate[i:i + BATCH_SIZE]
+                        ai_results = generate_adaptive_examples_batch(batch)
+
+                        # Ghép kết quả bằng ID
+                        example_map = {
+                            result["id"]: result["example"]
+                            for result in ai_results
+                            if isinstance(result, dict) and "id" in result and "example" in result
+                        }
+
+                        for item in st.session_state.deck:
+                            if item["id"] in example_map:
+                                item["example"] = example_map[item["id"]]
+                                updated_total += 1
+
+                    save_deck()
+                    st.success(f"✅ Đã cập nhật câu ví dụ cho {updated_total} từ.")
+
+            # Đánh dấu đã hoàn tất batch generation cho phiên ôn này
+            st.session_state.example_generation_pending = False
+            st.session_state.example_generation_done = True
+            st.session_state.modified_item_ids = set()
+
+        # Hiển thị thông báo chờ từ tiếp theo
         next_item = min(st.session_state.deck, key=lambda x: x["next_review"])
         remaining = (next_item["next_review"] - datetime.now()).total_seconds()
 
@@ -1022,16 +1074,13 @@ if selected_tab == "⏰ Ôn Tập":
             level = res_data.get("level", 1)
             item = res_data.get("item", {})
 
-            # Lấy speed và text phát âm chuẩn theo level mới
             speed = get_pronunciation_speed(level)
             text_to_speak = get_pronunciation_text(item, level)
 
-            # Đảm bảo Autoplay chỉ kích hoạt duy nhất 1 lần khi vừa render màn hình Kết quả
             should_auto_play = not st.session_state.get("tts_played_for_result", False)
             if should_auto_play:
                 st.session_state.tts_played_for_result = True
 
-            # UI Kết Quả
             with st.container():
                 st.markdown("<br>", unsafe_allow_html=True)
                 if is_correct:
@@ -1050,18 +1099,15 @@ if selected_tab == "⏰ Ôn Tập":
                 if example:
                     st.info(f"📖 *{example}*")
 
-                # Cụm TTS: Native Audio Streamlit phát âm ổn định
                 speak_text(text_to_speak, speed=speed, auto_play=should_auto_play, key_suffix="result")
 
                 st.markdown("---")
                 
-                # NÚT ▶ TIẾP TỤC BẮT BUỘC
                 if st.button("▶ TIẾP TỤC", type="primary", use_container_width=True, key="btn_continue_next"):
                     st.session_state.show_answer_result = False
                     st.session_state.result_data = {}
-                    st.session_state.tts_played_for_result = False # Reset cờ phát âm
+                    st.session_state.tts_played_for_result = False
                     
-                    # Chuẩn bị câu hỏi tiếp theo
                     due_now = [x for x in st.session_state.deck if x.get("next_review") and x["next_review"] <= datetime.now()]
                     if due_now:
                         min_level = min(x.get("level", 0) for x in due_now)
@@ -1082,6 +1128,11 @@ if selected_tab == "⏰ Ôn Tập":
             st.markdown("### 🧠 Sẵn sàng ôn tập?\nMochiVocab sẽ chọn một từ đang đến giờ và bắt đầu tính thời gian phản hồi.")
 
             if st.button("▶️ BẮT ĐẦU ÔN TẬP", type="primary", use_container_width=True, key="start_review"):
+                # Reset trạng thái batch khi bắt đầu lượt ôn mới
+                st.session_state.example_generation_pending = False
+                st.session_state.example_generation_done = False
+                st.session_state.modified_item_ids = set()
+
                 min_level = min(x.get("level", 0) for x in due_items)
                 candidates = [x for x in due_items if x.get("level", 0) == min_level]
                 item = random.choice(candidates)
@@ -1238,7 +1289,6 @@ Trả về duy nhất định dạng JSON thô (không bọc trong markdown):
         st.markdown("---")
         st.info(f"**{data['word'].upper()}** `{data.get('phonetic', '')}`")
 
-        # Nút nghe thử khi tra từ
         speak_text(data['word'], speed=1.0, auto_play=False, key_suffix="lookup")
 
         manual_meaning = st.text_input("Chỉnh sửa nghĩa tiếng Việt:", value=data.get("meaning", ""), key=f"manual_m_{data['word']}")
@@ -1632,6 +1682,9 @@ Trả về duy nhất JSON:
             st.session_state.temp_word = None
             st.session_state.show_answer_result = False
             st.session_state.tts_played_for_result = False
+            st.session_state.modified_item_ids = set()
+            st.session_state.example_generation_pending = False
+            st.session_state.example_generation_done = False
             save_deck()
             st.success("Đã xóa toàn bộ dữ liệu.")
             time.sleep(0.5)
