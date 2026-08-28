@@ -62,6 +62,8 @@ DEFAULT_STATE = {
     "all_scanned_words": [],
     "current_batch_index": 0,
     "sync_key": "",
+    "auto_merge_neutral_preview": None,
+    "auto_merge_neutral_undo_backup": None,
 }
 
 for key, value in DEFAULT_STATE.items():
@@ -325,7 +327,7 @@ def merge_items(local_item, imported_item):
     local_lv = int(local_item.get("level", 0))
     imp_lv = int(imported_item.get("level", 0))
     
-    if imp_lv > local_lv or (imp_lv == local_lv and int(imported_item.get("hook", 0)) > int(local_item.get("hook", 0))):
+    if imp_lv > local_lv or (imp_lv == local_lv and int(imported_item.get("hook", 0)) > int(imported_item.get("hook", 0))):
         merged["level"] = imported_item.get("level", merged.get("level"))
         merged["hook"] = imported_item.get("hook", merged.get("hook"))
         merged["interval"] = imported_item.get("interval", merged.get("interval"))
@@ -1129,6 +1131,107 @@ elif selected_tab == "📋 Sổ Tay":
         with col1: st.metric("Tổng từ", total)
         with col2: st.metric("Cần ôn", due)
         with col3: st.metric("Cấp 5 • Móc 4", mastered)
+
+        st.markdown("---")
+
+        # ----------------------------------------------------
+        # BỔ SUNG: NÚT "🤖 TỰ ĐỘNG GỘP TỪ TRUNG LẬP" & LOGIC HOÀN TÁC
+        # ----------------------------------------------------
+        
+        col_btn_merge, col_btn_undo = st.columns([2, 1])
+        with col_btn_merge:
+            if st.button("🤖 Tự động gộp từ trung lập", use_container_width=True, key="btn_trigger_auto_merge"):
+                # Xác định từ trung lập: các từ đang ở level == 0 (từ mới chưa đi vào tiến trình học)
+                neutral_items = [x for x in st.session_state.deck if int(x.get("level", 0)) == 0]
+                total_neutral = len(neutral_items)
+
+                if total_neutral == 0:
+                    st.info("ℹ️ Không có từ trung lập nào cần gộp.")
+                    st.session_state.auto_merge_neutral_preview = None
+                else:
+                    # Gom nhóm các từ trung lập theo mặt chữ
+                    groups = {}
+                    for item in neutral_items:
+                        key = item.get("word", "").strip().lower()
+                        if key:
+                            groups.setdefault(key, []).append(item)
+
+                    mergable_items_count = sum(len(group) for group in groups.values() if len(group) > 1)
+                    non_mergable_items_count = total_neutral - mergable_items_count
+
+                    st.session_state.auto_merge_neutral_preview = {
+                        "total_neutral": total_neutral,
+                        "mergable": mergable_items_count,
+                        "non_mergable": non_mergable_items_count,
+                        "groups": groups
+                    }
+
+        with col_btn_undo:
+            if st.session_state.get("auto_merge_neutral_undo_backup") is not None:
+                if st.button("↩️ Hoàn tác", use_container_width=True, key="btn_undo_merge"):
+                    st.session_state.deck = [dict(x) for x in st.session_state.auto_merge_neutral_undo_backup]
+                    st.session_state.auto_merge_neutral_undo_backup = None
+                    save_deck()
+                    st.success("✅ Đã khôi phục lại trạng thái dữ liệu trước khi gộp!")
+                    time.sleep(0.8)
+                    st.rerun()
+
+        # Hiển thị bước Xác nhận Thống kê trước khi gộp
+        preview_data = st.session_state.get("auto_merge_neutral_preview")
+        if preview_data:
+            st.info(
+                f"🤖 **Tìm thấy:**\n\n"
+                f"• Từ trung lập: **{preview_data['total_neutral']}**\n"
+                f"• Có thể gộp: **{preview_data['mergable']}**\n"
+                f"• Không thể gộp: **{preview_data['non_mergable']}**"
+            )
+
+            col_cf1, col_cf2 = st.columns(2)
+            with col_cf1:
+                if st.button("[ Tiếp tục gộp ]", type="primary", use_container_width=True, key="btn_confirm_merge"):
+                    # 1. Tạo Backup hoàn tác
+                    st.session_state.auto_merge_neutral_undo_backup = [dict(x) for x in st.session_state.deck]
+
+                    # 2. Phân tách danh sách: Giữ nguyên các từ không phải trung lập (level > 0)
+                    non_neutral_deck = [x for x in st.session_state.deck if int(x.get("level", 0)) > 0]
+                    
+                    # 3. Tiến hành gộp các từ trung lập theo từng nhóm phù hợp
+                    merged_neutral_deck = []
+                    for word_key, group in preview_data["groups"].items():
+                        if len(group) == 1:
+                            merged_neutral_deck.append(group[0])
+                        else:
+                            # Gộp các items trong cùng 1 nhóm bằng logic merge_items hiện có
+                            base_item = group[0]
+                            for other_item in group[1:]:
+                                base_item = merge_items(base_item, other_item)
+                            merged_neutral_deck.append(base_item)
+
+                    # 4. Hợp nhất lại toàn bộ dữ liệu & Lưu Local Storage
+                    new_deck = non_neutral_deck + merged_neutral_deck
+                    st.session_state.deck = new_deck
+                    save_deck()
+
+                    merged_count = preview_data["mergable"]
+                    unchanged_count = preview_data["non_mergable"]
+                    before_count = preview_data["total_neutral"]
+                    after_count = len(new_deck)
+
+                    st.session_state.auto_merge_neutral_preview = None
+                    st.success(
+                        f"✅ **Đã gộp từ trung lập**\n\n"
+                        f"• Trước: {before_count}\n"
+                        f"• Đã gộp: {merged_count}\n"
+                        f"• Không thay đổi: {unchanged_count}\n"
+                        f"• Sau khi gộp: {after_count}"
+                    )
+                    time.sleep(1.2)
+                    st.rerun()
+
+            with col_cf2:
+                if st.button("[ Hủy ]", use_container_width=True, key="btn_cancel_merge"):
+                    st.session_state.auto_merge_neutral_preview = None
+                    st.rerun()
 
         st.markdown("---")
 
