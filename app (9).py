@@ -1,8 +1,7 @@
-import urllib.parse
 import streamlit as st
 import streamlit.components.v1 as components
 
-# 1. Định nghĩa chuỗi HTML (Phải khai báo TRƯỚC khi gọi iframe)
+# 1. Định nghĩa chuỗi HTML (Phải khai báo TRƯỚC khi gọi components.html)
 html_code = """
 <!DOCTYPE html>
 <html>
@@ -10,35 +9,30 @@ html_code = """
     <style>
         body {
             font-family: Arial, sans-serif;
-            background-color: #f9f9f9;
+            background-color: #eef2f5;
             padding: 15px;
-            color: #333;
+            color: #2c3e50;
         }
-        .card {
+        .container {
             background: white;
             padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-radius: 10px;
+            border-left: 5px solid #007bff;
         }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h2>Giao diện nhúng từ HTML</h2>
-        <p>Đoạn mã này đã được mã hóa an toàn và truyền qua st.components.v1.iframe.</p>
+    <div class="container">
+        <h2>Giao diện render trực tiếp với components.html</h2>
+        <p>Cách 2 không cần dùng urllib.parse.quote, mã nguồn sạch và trực quan hơn hẳn!</p>
     </div>
 </body>
 </html>
 """
 
-# 2. Mã hóa mã HTML thành Data URL
-encoded_html = urllib.parse.quote(html_code)
-data_url = f"data:text/html;charset=utf-8,{encoded_html}"
-
-# 3. Hiển thị bằng components.iframe (quy định rõ width pixel > 0)
-components.iframe(
-    src=data_url,
-    width=700,
+# 2. Hiển thị trực tiếp nội dung HTML
+components.html(
+    html_code,
     height=400,
     scrolling=True
 )
