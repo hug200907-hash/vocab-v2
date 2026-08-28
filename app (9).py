@@ -3,14 +3,19 @@ import random
 import time
 import os
 import re
+import base64
 import urllib.parse
 import urllib.request
-import requests
 from datetime import datetime, timedelta
 
 import streamlit as st
 from streamlit_local_storage import LocalStorage
 from openai import OpenAI
+
+# Thư viện mã hóa chuẩn Python
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # ============================================================
 # 1. CẤU HÌNH APP & LOCAL STORAGE
@@ -23,10 +28,6 @@ st.set_page_config(
 )
 
 local_storage = LocalStorage()
-
-# API công cộng miễn phí dùng làm CSDL Cloud cho Sync Key (JSONBin Public hoặc tương đương)
-# Sử dụng KV storage miễn phí qua jsonbin.io / myjson
-PUBLIC_SYNC_API = "https://api.jsonbin.io/v3/b"
 
 # ============================================================
 # 2. HỆ THỐNG CẤP + MÓC
@@ -60,8 +61,7 @@ DEFAULT_STATE = {
     "search_filter": "",
     "all_scanned_words": [],
     "current_batch_index": 0,
-    "device_key": "",
-    "cloud_bin_id": "",
+    "sync_key": "",
 }
 
 for key, value in DEFAULT_STATE.items():
@@ -131,7 +131,7 @@ def get_current_interval(item):
     return get_hook_hours(item)
 
 # ============================================================
-# 6. CHUẨN HÓA ITEM & LOAD/SAVE (LOCAL + CLOUD SYNC)
+# 6. CHUẨN HÓA ITEM & LOAD/SAVE LOCAL
 # ============================================================
 
 def normalize_item(item):
@@ -176,101 +176,30 @@ def normalize_item(item):
     item["last_result"] = item.get("last_result", None)
 
     next_review = item.get("next_review")
-    if isinstance(next_review, datetime): item["next_review"] = next_review
+    if isinstance(next_review, datetime):
+        item["next_review"] = next_review
     elif isinstance(next_review, str):
         try: item["next_review"] = datetime.fromisoformat(next_review)
         except Exception: item["next_review"] = datetime.now()
-    else: item["next_review"] = datetime.now()
+    else:
+        item["next_review"] = datetime.now()
 
     item["interval"] = get_current_interval(item)
     return item
 
-# --- CLOUD SYNC HELPERS (Đã sửa lỗi mạng - Cơ chế Multi-Cloud dự phòng) ---
-def sync_push_to_cloud(key, deck_data):
-    """Đẩy dữ liệu lên Cloud theo Key 8 số (Thử qua nhiều Cloud Server)"""
-    if not key or len(key) != 8:
-        return False
-    
-    payload = json.dumps(deck_data, ensure_ascii=False).encode('utf-8')
-    headers = {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-    }
-    
-    # 1. Thử Server Cloud 1: KeyValue XYZ
-    try:
-        url1 = f"https://keyvalue.xyz/site/st_mochi_v1_{key}"
-        # Khởi tạo key phòng trường hợp key chưa tồn tại
-        init_req = urllib.request.Request(f"https://keyvalue.xyz/new/st_mochi_v1_{key}", method='POST')
-        try:
-            urllib.request.urlopen(init_req, timeout=3)
-        except Exception:
-            pass
-            
-        req1 = urllib.request.Request(url1, data=payload, headers=headers, method='POST')
-        with urllib.request.urlopen(req1, timeout=5) as resp:
-            if resp.status in (200, 201):
-                return True
-    except Exception:
-        pass
-
-    # 2. Dự phòng Server Cloud 2: KVDB IO
-    try:
-        url2 = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
-        req2 = urllib.request.Request(url2, data=payload, headers=headers, method='POST')
-        with urllib.request.urlopen(req2, timeout=6) as resp:
-            if resp.status in (200, 201):
-                return True
-    except Exception:
-        pass
-
-    return False
-
-def sync_pull_from_cloud(key):
-    """Tải dữ liệu từ Cloud theo Key 8 số (Kiểm tra cả 2 Cloud Server)"""
-    if not key or len(key) != 8:
-        return None
-    
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-
-    # 1. Thử lấy từ Server 1 (KeyValue XYZ)
-    try:
-        url1 = f"https://keyvalue.xyz/site/st_mochi_v1_{key}"
-        req1 = urllib.request.Request(url1, headers=headers)
-        with urllib.request.urlopen(req1, timeout=5) as resp:
-            data = resp.read().decode('utf-8')
-            if data and data != "null" and len(data) > 5:
-                return json.loads(data)
-    except Exception:
-        pass
-
-    # 2. Thử lấy từ Server 2 (KVDB IO)
-    try:
-        url2 = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
-        req2 = urllib.request.Request(url2, headers=headers)
-        with urllib.request.urlopen(req2, timeout=5) as resp:
-            data = resp.read().decode('utf-8')
-            if data and data != "null" and len(data) > 5:
-                return json.loads(data)
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return "NOT_FOUND"
-    except Exception:
-        pass
-
-    return None
-
 if not st.session_state.data_loaded:
     try:
-        saved_key = local_storage.getItem("mochi_device_key")
-        if saved_key: st.session_state.device_key = str(saved_key)
+        saved_key = local_storage.getItem("mochi_sync_key")
+        if saved_key:
+            st.session_state.sync_key = str(saved_key)
         
         saved_data = local_storage.getItem("mochi_deck_data")
         if saved_data:
             items = json.loads(saved_data)
             if isinstance(items, list):
                 st.session_state.deck = [normalize_item(x) for x in items if isinstance(x, dict)]
-    except Exception: st.session_state.deck = []
+    except Exception:
+        st.session_state.deck = []
     st.session_state.data_loaded = True
 
 def save_deck():
@@ -282,9 +211,8 @@ def save_deck():
         serializable_deck.append(copy_item)
     try:
         local_storage.setItem("mochi_deck_data", json.dumps(serializable_deck, ensure_ascii=False))
-        if st.session_state.device_key:
-            sync_push_to_cloud(st.session_state.device_key, serializable_deck)
-    except Exception: pass
+    except Exception:
+        pass
 
 def get_next_id():
     if not st.session_state.deck: return 1
@@ -292,7 +220,178 @@ def get_next_id():
     return max(ids) + 1 if ids else 1
 
 # ============================================================
-# 7. TÍCH HỢP LLM API (DÀNH CHO TRA TỪ, QUÉT BÀI & RESET)
+# 7. HỆ THỐNG ĐỒNG BỘ NỘI BỘ (KEY + MÃ HÓA FILE + MERGE 2 CHIỀU)
+# ============================================================
+
+def generate_sync_key():
+    """Tạo Sync Key ngẫu nhiên 8 ký tự gồm chữ in hoa và số"""
+    chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(random.choices(chars, k=8))
+
+def get_sync_key():
+    """Lấy Key từ session hoặc localStorage, nếu chưa có thì tạo mới"""
+    key = st.session_state.get("sync_key", "")
+    if not key or len(key) != 8:
+        try:
+            stored_key = local_storage.getItem("mochi_sync_key")
+            if stored_key and len(str(stored_key)) == 8:
+                key = str(stored_key)
+            else:
+                key = generate_sync_key()
+                local_storage.setItem("mochi_sync_key", key)
+        except Exception:
+            key = generate_sync_key()
+        st.session_state.sync_key = key
+    return key
+
+def _derive_key(passphrase: str, salt: bytes) -> bytes:
+    """Tạo AES key từ Sync Key"""
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+    )
+    return kdf.derive(passphrase.encode("utf-8"))
+
+def export_sync_file(key, deck_list):
+    """Đóng gói và mã hóa dữ liệu thành file đồng bộ .mochi"""
+    serializable_deck = []
+    for item in deck_list:
+        c = dict(item)
+        if isinstance(c.get("next_review"), datetime):
+            c["next_review"] = c["next_review"].isoformat()
+        serializable_deck.append(c)
+
+    payload = {
+        "version": 1,
+        "sync_key": key,
+        "exported_at": datetime.now().isoformat(),
+        "deck": serializable_deck
+    }
+    json_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    aes_key = _derive_key(key, salt)
+    
+    aesgcm = AESGCM(aes_key)
+    ciphertext = aesgcm.encrypt(nonce, json_bytes, None)
+    
+    # Kết hợp Salt + Nonce + Ciphertext
+    file_bytes = salt + nonce + ciphertext
+    return file_bytes
+
+def validate_and_decrypt_sync_file(file_bytes, current_key):
+    """Giải mã file .mochi và kiểm tra Sync Key"""
+    try:
+        # Nếu chưa được mã hóa (JSON thuần)
+        try:
+            data = json.loads(file_bytes.decode("utf-8"))
+            if data.get("sync_key") != current_key:
+                return False, f"❌ File này có mã đồng bộ ({data.get('sync_key')}) KHÔNG khớp với máy này ({current_key}).", None
+            return True, "✅ Xác nhận dữ liệu thành công!", data.get("deck", [])
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+
+        # Giải mã AES-GCM
+        if len(file_bytes) < 28:
+            return False, "❌ Tập tin bị hỏng hoặc không đúng định dạng.", None
+
+        salt = file_bytes[:16]
+        nonce = file_bytes[16:28]
+        ciphertext = file_bytes[28:]
+
+        aes_key = _derive_key(current_key, salt)
+        aesgcm = AESGCM(aes_key)
+        
+        decrypted_bytes = aesgcm.decrypt(nonce, ciphertext, None)
+        data = json.loads(decrypted_bytes.decode("utf-8"))
+
+        file_key = data.get("sync_key")
+        if file_key != current_key:
+            return False, f"❌ File này thuộc mã ({file_key}), không khớp với mã hiện tại ({current_key}).", None
+
+        return True, "✅ Đã giải mã và xác nhận mã đồng bộ thành công!", data.get("deck", [])
+
+    except Exception:
+        return False, f"❌ Không thể giải mã file. Mã đồng bộ của máy này ({current_key}) không khớp với mã tạo file!", None
+
+def merge_items(local_item, imported_item):
+    """Gộp 2 bản ghi trùng ID hoặc trùng từ, giữ lại dữ liệu học tập cao/mới hơn"""
+    merged = dict(local_item)
+    
+    # Ưu tiên cấp độ và tiến trình học cao hơn
+    local_lv = int(local_item.get("level", 0))
+    imp_lv = int(imported_item.get("level", 0))
+    
+    if imp_lv > local_lv or (imp_lv == local_lv and int(imported_item.get("hook", 0)) > int(local_item.get("hook", 0))):
+        merged["level"] = imported_item.get("level", merged.get("level"))
+        merged["hook"] = imported_item.get("hook", merged.get("hook"))
+        merged["interval"] = imported_item.get("interval", merged.get("interval"))
+        merged["next_review"] = imported_item.get("next_review", merged.get("next_review"))
+
+    # Bảo toàn thống kê ôn tập (lấy số lần học lớn hơn)
+    for field in ["review_count", "correct_count", "wrong_count"]:
+        merged[field] = max(int(local_item.get(field, 0)), int(imported_item.get(field, 0)))
+
+    # Ưu tiên các thông tin chi tiết hơn nếu local bị thiếu
+    for field in ["phonetic", "meaning", "example"]:
+        if not merged.get(field) and imported_item.get(field):
+            merged[field] = imported_item.get(field)
+
+    return normalize_item(merged)
+
+def merge_decks(local_deck, imported_deck):
+    """Hợp nhất 2 danh sách dữ liệu 2 chiều không làm mất từ và không lặp ID"""
+    merged_map = {}
+    word_to_id = {}
+
+    # 1. Nạp dữ liệu Local
+    for item in local_deck:
+        norm = normalize_item(item)
+        item_id = norm["id"]
+        word = norm["word"].lower()
+        
+        merged_map[item_id] = norm
+        if word:
+            word_to_id[word] = item_id
+
+    # Track thống kê
+    duplicate_count = 0
+    added_count = 0
+
+    # 2. Merge dữ liệu Imported
+    for item in imported_deck:
+        norm = normalize_item(item)
+        imp_id = norm["id"]
+        word = norm["word"].lower()
+
+        target_id = None
+        if imp_id in merged_map:
+            target_id = imp_id
+        elif word in word_to_id:
+            target_id = word_to_id[word]
+
+        if target_id is not None:
+            merged_map[target_id] = merge_items(merged_map[target_id], norm)
+            duplicate_count += 1
+        else:
+            # Tạo ID mới nếu trùng ID với local nhưng khác từ
+            if imp_id in merged_map or imp_id == 0:
+                new_id = max(list(merged_map.keys()) + [0]) + 1
+                norm["id"] = new_id
+            
+            merged_map[norm["id"]] = norm
+            if word:
+                word_to_id[word] = norm["id"]
+            added_count += 1
+
+    final_deck = list(merged_map.values())
+    return final_deck, len(local_deck), len(imported_deck), duplicate_count, len(final_deck)
+
+# ============================================================
+# 8. TÍCH HỢP LLM API (TRA TỪ, QUÉT BÀI & RESET)
 # ============================================================
 
 def call_llm_api(prompt, api_key=None):
@@ -326,7 +425,7 @@ def call_llm_api(prompt, api_key=None):
         return None
 
 # ============================================================
-# 8. TRA TỪ & DICTIONARY API
+# 9. TRA TỪ & DICTIONARY API
 # ============================================================
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -350,21 +449,8 @@ def fetch_online_example(word):
             if example: return example
     return None
 
-def play_audio_script(word):
-    safe_word = word.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", " ")
-    js_code = f"""
-    <script>
-    window.speechSynthesis.cancel();
-    var msg = new SpeechSynthesisUtterance('{safe_word}');
-    msg.lang = 'en-US';
-    msg.rate = 0.9;
-    window.speechSynthesis.speak(msg);
-    </script>
-    """
-    st.components.v1.html(js_code, height=0)
-
 # ============================================================
-# 9. TẠO CÂU HỎI TĨNH CHO TAB ÔN TẬP
+# 10. TẠO CÂU HỎI TĨNH CHO TAB ÔN TẬP
 # ============================================================
 
 FALLBACK_MEANINGS_POOL = [
@@ -457,7 +543,7 @@ def prepare_review_question(item):
         st.session_state.q_data = {"word": word, "question": meaning, "options": options, "answer": word}
 
 # ============================================================
-# 10. TIẾN / LÙI MÓC & XỬ LÝ ĐÁP ÁN
+# 11. TIẾN / LÙI MÓC & XỬ LÝ ĐÁP ÁN
 # ============================================================
 
 def advance_after_correct(item):
@@ -566,88 +652,87 @@ def reset_all_to_level_zero():
     st.session_state.review_started = False
     save_deck()
 
-# --- CẬP NHẬT HÀM SAVE_DECK (Chỉ lưu local nếu chưa có Key hoặc để người dùng chủ động sync) ---
-def save_deck():
-    serializable_deck = []
-    for item in st.session_state.deck:
-        copy_item = dict(item)
-        if isinstance(copy_item.get("next_review"), datetime):
-            copy_item["next_review"] = copy_item["next_review"].isoformat()
-        serializable_deck.append(copy_item)
-    try:
-        local_storage.setItem("mochi_deck_data", json.dumps(serializable_deck, ensure_ascii=False))
-        # Chỉ đẩy lên cloud khi máy này ĐÃ CÓ từ vựng
-        if st.session_state.device_key and len(serializable_deck) > 0:
-            sync_push_to_cloud(st.session_state.device_key, serializable_deck)
-    except Exception:
-        pass
+# ============================================================
+# 12. HEADER & ĐỒNG BỘ BẰNG FILE (GIAO DIỆN MỚI 100% OFFLINE)
+# ============================================================
 
-# ============================================================
-# 11. HEADER & ĐỒNG BỘ THIẾT BỊ (ĐÃ SỬA LỖI XÓA DỮ LIỆU)
-# ============================================================
+current_sync_key = get_sync_key()
 
 st.title("🍌 MochiVocab")
 st.caption("Dynamic Golden Time • Học theo cấp và 4 móc ghi nhớ")
 
-with st.expander("📲 Đăng Nhập / Đồng Bộ Nhiều Thiết Bị (Key 8 Số)"):
-    curr_key = st.session_state.get("device_key", "")
-    if curr_key:
-        st.success(f"🔑 Mã kết nối hiện tại: **{curr_key}**")
-    else:
-        st.info("💡 Chưa kết nối Key. Hãy thao tác ở **MÁY CÓ TỪ VỰNG trước**.")
-
-    c_k1, c_k2 = st.columns(2)
-    with c_k1:
-        st.markdown("**BƯỚC 1: Thực hiện ở Máy Có Từ (Máy 10 từ)**")
-        if st.button("➕ Máy này có từ -> Tạo Key Đăng Nhập"):
-            if len(st.session_state.deck) == 0:
-                st.error("⚠️ Máy này đang có 0 từ! Không thể tạo Key gốc vì sẽ làm mất dữ liệu máy khác. Hãy bấm tạo Key ở máy CÓ DỮ LIỆU.")
+with st.expander("☁️ Đồng bộ dữ liệu"):
+    st.subheader("🔑 Mã đồng bộ của bạn")
+    
+    col_k1, col_k2 = st.columns([3, 1])
+    with col_k1:
+        st.code(current_sync_key, language=None)
+    with col_k2:
+        new_k_input = st.text_input("Đổi Key (nếu chuyển sang máy mới):", max_chars=8, placeholder="Key 8 số...").strip().upper()
+        if st.button("Áp dụng Key mới"):
+            if len(new_k_input) == 8:
+                st.session_state.sync_key = new_k_input
+                local_storage.setItem("mochi_sync_key", new_k_input)
+                st.success("✅ Đã cập nhật Key!")
+                time.sleep(0.5)
+                st.rerun()
             else:
-                new_key = f"{random.randint(10000000, 99999999)}"
-                with st.spinner("🚀 Đang tải dữ liệu lên Cloud..."):
-                    serializable_deck = []
-                    for item in st.session_state.deck:
-                        copy_item = dict(item)
-                        if isinstance(copy_item.get("next_review"), datetime):
-                            copy_item["next_review"] = copy_item["next_review"].isoformat()
-                        serializable_deck.append(copy_item)
-                    
-                    if sync_push_to_cloud(new_key, serializable_deck):
-                        st.session_state.device_key = new_key
-                        local_storage.setItem("mochi_device_key", new_key)
-                        st.success(f"🎉 Tạo mã thành công: **{new_key}**! Hãy sang máy khác nhập 8 số này.")
-                        time.sleep(1.5)
-                        st.rerun()
-                    else:
-                        st.error("❌ Lỗi mạng, chưa thể đẩy dữ liệu lên Cloud. Thử lại!")
+                st.warning("⚠️ Key phải gồm 8 ký tự.")
 
-    with c_k2:
-        st.markdown("**BƯỚC 2: Thực hiện ở Máy Mới (Máy 0 từ)**")
-        input_key = st.text_input("Nhập Key 8 số từ máy gốc:", max_chars=8, placeholder="8 chữ số...").strip()
-        if st.button("🔗 Đăng Nhập & Nhận Dữ Liệu"):
-            if len(input_key) == 8 and input_key.isdigit():
-                with st.spinner("🔄 Đang lấy dữ liệu về..."):
-                    cloud_data = sync_pull_from_cloud(input_key)
-                    
-                    if cloud_data == "NOT_FOUND":
-                        st.error("❌ Mã 8 số này chưa có dữ liệu trên Server!")
-                    elif cloud_data is not None and isinstance(cloud_data, list) and len(cloud_data) > 0:
-                        st.session_state.device_key = input_key
-                        local_storage.setItem("mochi_device_key", input_key)
-                        
-                        # Gộp từ cũ và từ mới (không sợ bị ghi đè mất từ)
-                        existing_ids = {x.get("id") for x in st.session_state.deck}
-                        new_items = [normalize_item(x) for x in cloud_data if isinstance(x, dict)]
-                        
-                        st.session_state.deck = new_items
-                        save_deck()
-                        st.success(f"✅ Thành công! Đã đồng bộ {len(new_items)} từ về máy này.")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error("❌ Không tìm thấy từ vựng nào trên mã này!")
+    st.caption("Sao chép mã này để nhập vào các máy khác của bạn.")
+    st.markdown("---")
+
+    col_sync1, col_sync2 = st.columns(2)
+
+    # 📤 XUẤT DỮ LIỆU
+    with col_sync1:
+        st.markdown("### 📤 Xuất dữ liệu")
+        st.write("Tạo file đồng bộ đã mã hóa bằng mã Key của bạn.")
+        
+        sync_file_bytes = export_sync_file(current_sync_key, st.session_state.deck)
+        filename = f"mochivocab_sync_{current_sync_key}.mochi"
+
+        st.download_button(
+            label="⬇️ Tải file đồng bộ",
+            data=sync_file_bytes,
+            file_name=filename,
+            mime="application/octet-stream",
+            use_container_width=True
+        )
+
+    # 📥 NHẬP DỮ LIỆU
+    with col_sync2:
+        st.markdown("### 📥 Nhập dữ liệu")
+        uploaded_file = st.file_uploader("Chọn file đồng bộ (.mochi):", type=["mochi", "json"], key="sync_uploader")
+
+        if uploaded_file is not None:
+            file_bytes = uploaded_file.read()
+            
+            # 1. Giải mã & Validate
+            is_valid, msg, imported_deck = validate_and_decrypt_sync_file(file_bytes, current_sync_key)
+            
+            if not is_valid:
+                st.error(msg)
             else:
-                st.warning("⚠️ Nhập đúng 8 chữ số.")
+                st.success(msg)
+                
+                # 2. MERGE 2 CHIỀU trên bản COPY trước
+                local_copy = [dict(x) for x in st.session_state.deck]
+                merged_deck, count_local, count_imp, count_dup, count_final = merge_decks(local_copy, imported_deck)
+                
+                # 3. Ghi đè Local & Lưu
+                st.session_state.deck = merged_deck
+                save_deck()
+
+                st.success("✅ Gộp dữ liệu thành công!")
+                st.info(
+                    f"• Dữ liệu hiện tại: **{count_local}**\n\n"
+                    f"• Dữ liệu từ file: **{count_imp}**\n\n"
+                    f"• Trùng lặp (đã gộp): **{count_dup}**\n\n"
+                    f"• Sau khi gộp: **{count_final}** từ"
+                )
+                time.sleep(1.5)
+                st.rerun()
 
 now = datetime.now()
 due_count = sum(1 for x in st.session_state.deck if x.get("next_review") and x["next_review"] <= now)
@@ -672,7 +757,7 @@ selected_tab = st.radio(
 st.markdown("---")
 
 # ============================================================
-# 12. TAB ÔN TẬP
+# 13. TAB ÔN TẬP
 # ============================================================
 
 if selected_tab == "⏰ Ôn Tập":
@@ -700,35 +785,6 @@ if selected_tab == "⏰ Ôn Tập":
         with col2: st.metric("Cấp", next_item["level"])
 
         st.info(f"⏰ Còn khoảng **{format_remaining(remaining)}**")
-        remaining_seconds = max(0, int(remaining))
-
-        st.components.v1.html(
-            f"""
-            <div style="text-align:center; background:#262730; color:#00FF66; padding:20px; border-radius:15px; margin-top:15px;">
-                <div style="font-size:13px; color:#AAAAAA; margin-bottom:8px;">THỜI ĐIỂM VÀNG TIẾP THEO</div>
-                <div id="mochi-countdown" style="font-size:30px; font-weight:bold; font-family:monospace;">--:--:--</div>
-            </div>
-            <script>
-                let remaining = {remaining_seconds};
-                function updateCountdown() {{
-                    const countdown = document.getElementById("mochi-countdown");
-                    if (!countdown) return;
-                    if (remaining <= 0) {{ countdown.innerText = "🔥 ĐÃ ĐẾN GIỜ! Hãy chọn lại tab Ôn Tập"; return; }}
-                    const days = Math.floor(remaining / 86400);
-                    const hours = Math.floor((remaining % 86400) / 3600);
-                    const minutes = Math.floor((remaining % 3600) / 60);
-                    const seconds = remaining % 60;
-                    let result = days > 0 ? `${{days}} ngày ${{String(hours).padStart(2, "0")}}:${{String(minutes).padStart(2, "0")}}:${{String(seconds).padStart(2, "0")}}`
-                                          : `${{String(hours).padStart(2, "0")}}:${{String(minutes).padStart(2, "0")}}:${{String(seconds).padStart(2, "0")}}`;
-                    countdown.innerText = result;
-                    remaining--;
-                }}
-                updateCountdown();
-                setInterval(updateCountdown, 1000);
-            </script>
-            """,
-            height=120
-        )
 
     else:
         if not st.session_state.review_started:
@@ -788,8 +844,6 @@ if selected_tab == "⏰ Ôn Tập":
             if q_type == "CHOICE_MEANING":
                 st.markdown("### 🎲 TRẮC NGHIỆM CHỌN NGHĨA")
                 st.info(f"Từ: **{item['word'].upper()}** `{item.get('phonetic', '')}`")
-
-                if st.button("🔊 Nghe", key="choice_audio"): play_audio_script(item["word"])
 
                 st.write("Chọn nghĩa tiếng Việt:")
                 for index, option in enumerate(q_data.get("options", [])):
@@ -855,7 +909,7 @@ if selected_tab == "⏰ Ôn Tập":
                         process_answer(option.strip().lower() == item["word"].strip().lower(), item["word"].upper())
 
 # ============================================================
-# 13. TAB TRA TỪ MỚI
+# 14. TAB TRA TỪ MỚI
 # ============================================================
 
 elif selected_tab == "🔍 Tra Từ Mới":
@@ -902,34 +956,30 @@ Trả về duy nhất định dạng JSON thô (không bọc trong markdown):
         data["example"] = manual_example.strip()
         st.session_state.temp_word = data
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔊 Nghe", key="new_word_audio"): play_audio_script(data["word"])
-        with col2:
-            if st.button("➕ Thêm vào Sổ Tay", key="add_new_word", type="primary"):
-                exists = any(x.get("word", "").strip().lower() == data["word"].strip().lower() for x in st.session_state.deck)
-                if exists: st.warning("⚠️ Từ này đã có trong Sổ Tay.")
-                elif not data.get("meaning", "").strip(): st.error("⚠️ Cần có nghĩa tiếng Việt trước khi lưu!")
-                else:
-                    new_item = {
-                        "id": get_next_id(),
-                        "word": data["word"],
-                        "phonetic": data.get("phonetic", ""),
-                        "meaning": data["meaning"],
-                        "example": data["example"],
-                        "level": 0, "hook": 0, "interval": 0,
-                        "review_count": 0, "correct_count": 0, "wrong_count": 0,
-                        "last_response_time": None, "last_result": None,
-                        "next_review": datetime.now()
-                    }
-                    st.session_state.deck.append(new_item)
-                    save_deck()
-                    st.success(f"✅ Đã thêm **{data['word'].upper()}** vào Sổ Tay!")
-                    time.sleep(0.5)
-                    st.rerun()
+        if st.button("➕ Thêm vào Sổ Tay", key="add_new_word", type="primary"):
+            exists = any(x.get("word", "").strip().lower() == data["word"].strip().lower() for x in st.session_state.deck)
+            if exists: st.warning("⚠️ Từ này đã có trong Sổ Tay.")
+            elif not data.get("meaning", "").strip(): st.error("⚠️ Cần có nghĩa tiếng Việt trước khi lưu!")
+            else:
+                new_item = {
+                    "id": get_next_id(),
+                    "word": data["word"],
+                    "phonetic": data.get("phonetic", ""),
+                    "meaning": data["meaning"],
+                    "example": data["example"],
+                    "level": 0, "hook": 0, "interval": 0,
+                    "review_count": 0, "correct_count": 0, "wrong_count": 0,
+                    "last_response_time": None, "last_result": None,
+                    "next_review": datetime.now()
+                }
+                st.session_state.deck.append(new_item)
+                save_deck()
+                st.success(f"✅ Đã thêm **{data['word'].upper()}** vào Sổ Tay!")
+                time.sleep(0.5)
+                st.rerun()
 
 # ============================================================
-# 14. TAB QUÉT BÀI ĐỌC
+# 15. TAB QUÉT BÀI ĐỌC
 # ============================================================
 
 elif selected_tab == "📄 Quét Bài Đọc":
@@ -1064,7 +1114,7 @@ Chỉ trả về JSON thô.
             st.rerun()
 
 # ============================================================
-# 15. TAB SỔ TAY
+# 16. TAB SỔ TAY
 # ============================================================
 
 elif selected_tab == "📋 Sổ Tay":
@@ -1184,51 +1234,6 @@ Trả về duy nhất JSON:
 
         st.markdown("---")
 
-        st.markdown("### 🤖 AI Reset Lại Nghĩa & Ví Dụ Cho Toàn Bộ Sổ Tay")
-        if st.button("⚡ AI RESET LẠI TOÀN BỘ SỔ TAY", type="primary", use_container_width=True, key="ai_bulk_reset"):
-            with st.spinner("🤖 AI đang làm mới nghĩa và ví dụ cho toàn bộ từ..."):
-                all_words = [x["word"] for x in st.session_state.deck]
-                prompt_bulk = f"""
-Cung cấp bản dịch nghĩa tiếng Việt ngắn gọn và 1 câu ví dụ ngắn cho danh sách từ sau:
-{json.dumps(all_words)}
-
-Trả về kết quả duy nhất dạng JSON Array:
-[
-  {{ "word": "từ tiếng anh", "meaning": "nghĩa việt", "example": "câu ví dụ" }}
-]
-Chỉ trả về JSON thô.
-"""
-                res = call_llm_api(prompt_bulk)
-                if res:
-                    try:
-                        updated = json.loads(res)
-                        up_dict = {x["word"].lower(): x for x in updated}
-                        for item in st.session_state.deck:
-                            w = item["word"].lower()
-                            if w in up_dict:
-                                item["meaning"] = up_dict[w].get("meaning", item["meaning"])
-                                item["example"] = up_dict[w].get("example", item["example"])
-                        save_deck()
-                        st.success("🎉 Đã reset thành công nghĩa & ví dụ cho toàn bộ Sổ Tay!")
-                        time.sleep(0.8)
-                        st.rerun()
-                    except Exception: st.error("❌ Lỗi phân tích JSON từ AI.")
-
-        st.markdown("---")
-
-        st.markdown("### 📐 Hệ thống Thời Điểm Vàng")
-        hook_table = {
-            "Cấp 0": "0h — Từ mới",
-            "Cấp 1": "1h → 4h → 12h → 24h",
-            "Cấp 2": "25h → 28h → 36h → 48h",
-            "Cấp 3": "49h → 52h → 60h → 72h",
-            "Cấp 4": "73h → 76h → 84h → 96h",
-            "Cấp 5": "97h → 100h → 108h → 120h",
-        }
-        st.table([{"Cấp": level_name, "Các móc": hooks} for level_name, hooks in hook_table.items()])
-
-        st.markdown("---")
-
         if st.button("🔄 RESET ALL VỀ CẤP 0", use_container_width=True, key="reset_all_words"):
             reset_all_to_level_zero()
             st.success("✅ Đã reset toàn bộ từ về Cấp 0.")
@@ -1253,8 +1258,8 @@ Chỉ trả về JSON thô.
         st.info("📚 Sổ tay đang trống.")
 
 # ============================================================
-# 16. FOOTER
+# 17. FOOTER
 # ============================================================
 
 st.markdown("---")
-st.caption("🍌 MochiVocab • Dynamic Golden Time")
+st.caption("🍌 MochiVocab • Dynamic Golden Time (100% Offline Sync)")
