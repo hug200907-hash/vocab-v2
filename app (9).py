@@ -8,7 +8,6 @@ import urllib.request
 from datetime import datetime, timedelta
 
 import streamlit as st
-import streamlit.components.v1 as components
 from streamlit_local_storage import LocalStorage
 from openai import OpenAI
 
@@ -268,10 +267,6 @@ def fetch_online_example(word):
             if example: return example
     return None
 
-def play_audio_script(word):
-    # Sử dụng Web Speech API native qua iframe/js đơn giản khi gọi
-    pass
-
 # ============================================================
 # 9. TẠO CÂU HỎI TĨNH CHO TAB ÔN TẬP
 # ============================================================
@@ -476,7 +471,7 @@ def reset_all_to_level_zero():
     save_deck()
 
 # ============================================================
-# 11. STREAMLIT UI: ĐỒNG BỘ P2P NỔI BÊN NỀN (ONLY ST.IFRAME ENGINE)
+# 11. STREAMLIT UI: ĐỒNG BỘ P2P NỔI BÊN NỀN (ONLY ST.IFRAME NATIVE)
 # ============================================================
 
 st.subheader("🌐 Đồng bộ dữ liệu P2P (WebRTC)")
@@ -501,7 +496,7 @@ with st.expander("🔑 Cấu hình Mã Đồng Bộ P2P", expanded=True):
             st.rerun()
 
     # ---------------------------------------------------------------------
-    # DUY NHẤT 1 ST.IFRAME ĐẢM NHẬN TOÀN BỘ ENGINE KẾT NỐI P2P WEBRTC
+    # DUY NHẤT 1 ST.IFRAME (NATIVE STREAMLIT API) CHO P2P ENGINE
     # ---------------------------------------------------------------------
     payload_to_send_js = json.dumps(st.session_state.p2p_payload_to_send)
     
@@ -550,13 +545,11 @@ with st.expander("🔑 Cấu hình Mã Đồng Bộ P2P", expanded=True):
             function setupEvents() {{
                 if (!conn) return;
                 conn.on('open', () => {{
-                    // Nếu có dữ liệu cần phát ngay khi nối máy
                     if (payloadToSend && payloadToSend.length > 0) {{
                         conn.send(payloadToSend);
                     }}
                 }});
                 conn.on('data', (data) => {{
-                    // Lưu dữ liệu máy bên kia phát sang vào localStorage
                     localStorage.setItem('mochi_p2p_received_data', data);
                 }});
             }}
@@ -567,12 +560,11 @@ with st.expander("🔑 Cấu hình Mã Đồng Bộ P2P", expanded=True):
     </html>
     """
     
-    # Render duy nhất bằng st.iframe
-    components.iframe(f"data:text/html;charset=utf-8,{urllib.parse.quote(html_p2p_iframe)}", height=0, width=0)
+    # Sử dụng st.iframe trực tiếp từ thư viện Streamlit
+    st.iframe(f"data:text/html;charset=utf-8,{urllib.parse.quote(html_p2p_iframe)}", height=0, width=0)
 
     col1, col2 = st.columns(2)
 
-    # NÚT 1: TẢI DỮ LIỆU LÊN (Gửi P2P sang máy đối phương)
     with col1:
         if st.button("☁️ Tải dữ liệu lên (P2P)", type="primary", use_container_width=True):
             if not st.session_state.deck:
@@ -590,7 +582,6 @@ with st.expander("🔑 Cấu hình Mã Đồng Bộ P2P", expanded=True):
                 time.sleep(0.5)
                 st.rerun()
 
-    # NÚT 2: TẢI DỮ LIỆU XUỐNG (Đọc P2P nhận được từ máy đối phương)
     with col2:
         if st.button("📥 Tải dữ liệu xuống (P2P)", use_container_width=True):
             try:
@@ -720,7 +711,6 @@ if selected_tab == "⏰ Ôn Tập":
 
             st.markdown("---")
 
-            # 1. CHOICE MEANING
             if q_type == "CHOICE_MEANING":
                 st.markdown("### 🎲 TRẮC NGHIỆM CHỌN NGHĨA")
                 st.info(f"Từ: **{item['word'].upper()}** `{item.get('phonetic', '')}`")
@@ -730,7 +720,6 @@ if selected_tab == "⏰ Ôn Tập":
                     if st.button(option, key=f"choice_{item['id']}_{index}"):
                         process_answer(option.strip().lower() == item["meaning"].strip().lower(), item["meaning"])
 
-            # 2. FILL BLANK
             elif q_type == "FILL_BLANK":
                 st.markdown("### ✏️ ĐIỀN TỪ VÀO CHỖ TRỐNG")
                 st.info(f"**{q_data.get('sentence', '')}**")
@@ -742,7 +731,6 @@ if selected_tab == "⏰ Ôn Tập":
                 if st.button("Xác Nhận", type="primary", key=f"fill_submit_{item['id']}"):
                     process_answer(user_ans.strip().lower() == item["word"].strip().lower(), item["word"].upper())
 
-            # 3. SPELLING
             elif q_type == "SPELLING":
                 st.markdown("### ✍️ LUYỆN CHÍNH TẢ")
                 st.info(f"Nghĩa tiếng Việt: **{item['meaning'].upper()}**")
@@ -754,7 +742,6 @@ if selected_tab == "⏰ Ôn Tập":
                 if st.button("Xác Nhận", type="primary", key=f"spell_submit_{item['id']}"):
                     process_answer(user_ans.strip().lower() == item["word"].strip().lower(), item["word"].upper())
 
-            # 4. CONTEXT MATCH
             elif q_type == "CONTEXT_MATCH":
                 st.markdown("### 🧠 NGHĨA THEO NGỮ CẢNH")
                 st.info(f'"{q_data.get("context", "")}"')
@@ -764,7 +751,6 @@ if selected_tab == "⏰ Ôn Tập":
                     if st.button(option, key=f"context_{item['id']}_{index}"):
                         process_answer(option.strip().lower() == item["meaning"].strip().lower(), item["meaning"])
 
-            # 5. TRUE / FALSE
             elif q_type == "FLASHCARD_TRUE_FALSE":
                 st.markdown("### ⚡ FLASHCARD PHẢN XẠ")
                 st.info(f"Từ: **{item['word']}**\n\nNghĩa: **{q_data.get('disp_meaning', '')}**")
@@ -778,7 +764,6 @@ if selected_tab == "⏰ Ôn Tập":
                     if st.button("❌ SAI", key=f"false_{item['id']}"):
                         process_answer(not q_data["is_true"], "SAI" if not q_data["is_true"] else "ĐÚNG")
 
-            # 6. MEANING CHOICE
             elif q_type == "MEANING_CHOICE":
                 st.markdown("### 🔤 NGHĨA → CHỌN TỪ TIẾNG ANH")
                 st.info(f"Nghĩa: **{q_data.get('question', '').upper()}**")
