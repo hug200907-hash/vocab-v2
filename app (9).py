@@ -6,7 +6,9 @@ import re
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
+import streamlit.components.v1 as components
 
+components.html(html_code, height=500, scrolling=True)
 import streamlit as st
 from streamlit_local_storage import LocalStorage
 from openai import OpenAI
