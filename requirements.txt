@@ -4,5 +4,6 @@ streamlit-local-storage
 streamlit-autorefresh
 google-genai
 openai
+pyttsx3
 requests
 cryptography
