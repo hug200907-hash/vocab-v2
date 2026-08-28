@@ -6,6 +6,7 @@ import re
 import base64
 import urllib.parse
 import urllib.request
+import tempfile
 from datetime import datetime, timedelta
 
 import streamlit as st
@@ -16,6 +17,13 @@ from openai import OpenAI
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+# Thư viện Windows TTS Local (PyTTSx3 / SAPI5)
+try:
+    import pyttsx3
+    HAS_PYTTSX3 = True
+except ImportError:
+    HAS_PYTTSX3 = False
 
 # ============================================================
 # 1. CẤU HÌNH APP & LOCAL STORAGE
@@ -41,6 +49,7 @@ LEVEL_HOOKS = {
     5: [97, 100, 108, 120],
 }
 
+# Mapping Level sang Tốc độ phát âm (PHẦN O)
 LEVEL_SPEED = {
     1: 0.75,
     2: 1.00,
@@ -53,7 +62,7 @@ MAX_LEVEL = 5
 HOOKS_PER_LEVEL = 4
 
 # ============================================================
-# 3. SESSION STATE
+# 3. SESSION STATE (PHẦN S, T)
 # ============================================================
 
 DEFAULT_STATE = {
@@ -72,8 +81,16 @@ DEFAULT_STATE = {
     "sync_key": "",
     "auto_merge_neutral_preview": None,
     "auto_merge_neutral_undo_backup": None,
-    "show_answer_result": False, # Quản lý hiển thị màn hình kết quả trung gian
-    "result_data": {},          # Lưu trữ thông tin kết quả vừa trả lời
+    
+    # Session States cho Result UI & Chống gọi lặp (PHẦN S, T)
+    "show_answer_result": False,
+    "answer_result_item": None,
+    "answer_result_correct": False,
+    "answer_result_level": 1,
+    "answer_result_audio": None,
+    "answer_result_audio_text": "",
+    "answer_result_audio_speed": 1.0,
+    "last_processed_q_id": None, # Chống rerun lặp
 }
 
 for key, value in DEFAULT_STATE.items():
@@ -86,21 +103,59 @@ for key, value in DEFAULT_STATE.items():
             st.session_state[key] = value
 
 # ============================================================
-# 4. HÀM PHÁT ÂM (TTS) & TỐC ĐỘ THEO LEVEL (PHẦN C, R, S, T)
+# 4. MODULE WINDOWS TTS LOCAL (PHẦN L, M, U)
 # ============================================================
 
-def get_pronunciation_speed(level):
-    """Lấy tốc độ đọc chuẩn dựa trên level của từ (1 -> 5)"""
+def generate_tts_audio(text: str, speed: float = 1.0) -> bytes:
+    """
+    Sử dụng Windows Speech Engine (SAPI5) local hoàn toàn không dùng Internet.
+    Xuất audio ra WAV bytes để đưa vào st.audio(). (PHẦN L, M, U)
+    """
+    if not text or not HAS_PYTTSX3:
+        return None
+
+    clean_text = str(text).strip()
+    if not clean_text:
+        return None
+
     try:
-        lvl = int(level)
-    except Exception:
-        lvl = 1
-    lvl = max(1, min(5, lvl))
-    return LEVEL_SPEED.get(lvl, 1.0)
+        # Tạo file tạm thời trên đĩa cứng local
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as fp:
+            temp_path = fp.name
+
+        engine = pyttsx3.init()
+        
+        # Thiết lập giọng đọc tiếng Anh
+        voices = engine.getProperty("voices")
+        for voice in voices:
+            if "english" in voice.name.lower() or "en" in voice.id.lower():
+                engine.setProperty("voice", voice.id)
+                break
+
+        # Tốc độ chuẩn SAPI5 trung bình là 200 WPM
+        base_rate = 200
+        engine.setProperty("rate", int(base_rate * speed))
+
+        # Lưu audio vào file tạm
+        engine.save_to_file(clean_text, temp_path)
+        engine.runAndWait()
+        engine.stop()
+
+        # Đọc bytes từ file tạm
+        with open(temp_path, "rb") as f:
+            audio_bytes = f.read()
+
+        # Xóa file tạm sau khi đọc xong
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+        return audio_bytes
+    except Exception as e:
+        return None
 
 def get_pronunciation_text(item, level):
     """
-    Xác định nội dung phát âm dựa trên level:
+    Nội dung đọc theo level mới (PHẦN P):
     - Level 1-4: Đọc TỪ (item["word"])
     - Level 5: Đọc CẢ CÂU VÍ DỤ (item["example"])
     """
@@ -114,35 +169,6 @@ def get_pronunciation_text(item, level):
         return ex if ex else item.get("word", "").strip()
     else:
         return item.get("word", "").strip()
-
-def speak_text(text, speed=1.0, auto_play=True):
-    """
-    Phát âm tiếng Anh thông qua HTML5 Audio Data URI.
-    Hỗ trợ auto-play trực tiếp và nút phát lại.
-    """
-    if not text:
-        return
-    
-    clean_text = str(text).strip()
-    encoded_text = urllib.parse.quote(clean_text)
-    # Dùng Google Translate TTS API để lấy audio MP3 chuẩn tiếng Anh (en)
-    tts_url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={encoded_text}&tl=en&client=tw-ob"
-
-    # Nhúng Audio HTML5 với tốc độplaybackRate điều chỉnh theo level
-    autoplay_attr = "autoplay" if auto_play else ""
-    audio_id = f"tts_audio_{abs(hash(text + str(time.time())))}"
-
-    html_code = f"""
-    <audio id="{audio_id}" src="{tts_url}" {autoplay_attr}></audio>
-    <script>
-        var audio = document.getElementById('{audio_id}');
-        if (audio) {{
-            audio.playbackRate = {speed};
-            audio.play().catch(function(e) {{ console.log("Auto-play prevented or ready:", e); }});
-        }}
-    </script>
-    """
-    st.components.v1.html(html_code, height=0, width=0)
 
 # ============================================================
 # 5. THUẬT TOÁN GỢI Ý (HINT) NGUYÊN ÂM THÔNG MINH
@@ -298,10 +324,11 @@ def get_current_interval(item):
     return get_hook_hours(item)
 
 # ============================================================
-# 7. CHUẨN HÓA ITEM & LOAD/SAVE LOCAL
+# 7. CHUẨN HÓA ITEM & LOAD/SAVE LOCAL (PHẦN A, J)
 # ============================================================
 
 def normalize_item(item):
+    """Sử dụng chính xác cấu trúc dữ liệu từ Sổ Tay (PHẦN A)"""
     item = dict(item)
 
     try: item["id"] = int(item.get("id", 0))
@@ -370,6 +397,7 @@ if not st.session_state.data_loaded:
     st.session_state.data_loaded = True
 
 def save_deck():
+    """Lưu lập tức vào Local Storage (PHẦN J)"""
     serializable_deck = []
     for item in st.session_state.deck:
         copy_item = dict(item)
@@ -562,1078 +590,4 @@ def call_llm_api(prompt, api_key=None):
         if response.choices and response.choices[0].message.content:
             content = response.choices[0].message.content
             cleaned = re.sub(r"^```(?:json)?\s*", "", content.strip(), flags=re.MULTILINE)
-            cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE)
-            return cleaned.strip()
-        return None
-    except Exception as e:
-        return None
-
-# ============================================================
-# 9.1 ADAPTIVE EXAMPLE GENERATOR (PHẦN E - N)
-# ============================================================
-
-def map_level_to_target_audience(level):
-    """Mapping level sang tiêu chí độ khó chi tiết (Phần F, G)"""
-    try:
-        lvl = int(level)
-    except Exception:
-        lvl = 1
-
-    if lvl <= 1:
-        return "LEVEL 1/5 (Người mới/trẻ nhỏ): Câu rất ngắn, từ vựng cơ bản, cấu trúc đơn đơn giản, tình huống cụ thể dễ hình dung."
-    elif lvl == 2:
-        return "LEVEL 2/5 (Tiểu học): Vẫn dễ hiểu, dài hơn L1, thêm thời gian/nơi chốn/nguyên nhân đơn giản, có thể dùng and, but, because, when."
-    elif lvl == 3:
-        return "LEVEL 3/5 (THCS): Cấu trúc rõ ràng, dùng because, although, while, when, if, before, after, mệnh đề quan hệ đơn giản."
-    elif lvl == 4:
-        return "LEVEL 4/5 (THPT): Complex sentences, relative clauses, conditional structures, participle clauses khi phù hợp, diễn đạt ý phức tạp hơn."
-    else:
-        return "LEVEL 5/5 (Học thuật cao): Complex clauses, academic vocabulary, formal expressions, collocations, cấu trúc lồng nhau, ý tưởng trừu tượng nhưng vẫn tự nhiên."
-
-def generate_adaptive_example(item, new_level):
-    """
-    Tạo câu ví dụ thích ứng dựa theo Level mới sau khi trả lời. (Phần E-N)
-    Nếu API/JSON lỗi -> giữ nguyên example cũ (Phần O)
-    """
-    word = item.get("word", "").strip()
-    meaning = item.get("meaning", "").strip()
-    prev_example = item.get("example", "").strip()
-    audience_req = map_level_to_target_audience(new_level)
-
-    prompt = f"""
-Bạn là chuyên gia biên soạn giáo trình tiếng Anh thích ứng (Adaptive Learning).
-Hãy tạo MỘT câu ví dụ tiếng Anh mới cho từ mục tiêu (target word).
-
-THÔNG TIN TỪ MỤC TIÊU:
-- Target Word: "{word}" (Phải dùng chính xác từ này, không thay bằng synonym)
-- Nghĩa đang học: "{meaning}" (Giữ đúng nghĩa này, không đổi sang nghĩa khác)
-- Cấp độ yêu cầu: Level {new_level}/5
-- Yêu cầu độ khó: {audience_req}
-- Câu ví dụ cũ (previous_example): "{prev_example}"
-
-CÁC QUY TẮC BẮT BUỘC:
-1. TARGET WORD PHẢI ĐƯỢC DÙNG DÙNG ĐÚNG CHÍNH TẢ: "{word}".
-2. ĐỘ KHÓ PHẢI TĂNG/GIẢM BẰNG CHẤT LƯỢNG (Vocabulary, Grammar, Sentence structure, Logical relationships) đúng chuẩn Level {new_level}/5.
-3. KHÔNG TẠO EXAMPLE CHUNG CHUNG: Ngữ cảnh phải đủ mạnh sao cho nếu đục lỗ (FILL_BLANK) thì "{word}" là đáp án tự nhiên và chính xác nhất. Tránh các câu kiểu "This is a nice _____."
-4. KIỂM TRA MULTIPLE VALID ANSWERS: Tự kiểm tra xem có từ thông dụng nào khác thay thế tự nhiên cho "{word}" trong câu này không. Nếu CÓ -> Hãy viết lại câu khác rõ ngữ cảnh hơn.
-5. KHÔNG LẶP LẠI EXAMPLE CỦA LẦN TRƯỚC: Thay đổi hẳn ngữ cảnh/cấu trúc, không chỉ thay đổi tên riêng hoặc đổi vài từ đơn giản.
-
-YÊU CẦU ĐẦU RA:
-Trả về DUY NHẤT JSON thô (không markdown, không giải thích):
-{{
-  "example": "Câu ví dụ tiếng Anh mới hoàn chỉnh ở đây"
-}}
-"""
-    res = call_llm_api(prompt)
-    if res:
-        try:
-            res_data = json.loads(res)
-            new_ex = res_data.get("example", "").strip()
-            if new_ex and len(new_ex) > 3:
-                return new_ex
-        except Exception:
-            pass
-    return None
-
-# ============================================================
-# 10. TRA TỪ & DICTIONARY API
-# ============================================================
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_dictionary_data(word):
-    if not word: return None
-    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word)}"
-    try:
-        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(request, timeout=4) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            if isinstance(data, list) and data: return data
-    except Exception: pass
-    return None
-
-def fetch_online_example(word):
-    data = fetch_dictionary_data(word)
-    if not data: return None
-    for meaning_obj in data[0].get("meanings", []):
-        for def_obj in meaning_obj.get("definitions", []):
-            example = def_obj.get("example")
-            if example: return example
-    return None
-
-# ============================================================
-# 11. TẠO CÂU HỎI TĨNH CHO TAB ÔN TẬP
-# ============================================================
-
-FALLBACK_MEANINGS_POOL = [
-    "Sự phát triển", "Khả năng thích nghi", "Thành tựu", "Môi trường", "Kinh nghiệm",
-    "Khả năng phục hồi", "Đổi mới sáng tạo", "Thách thức", "Cơ hội", "Mục tiêu trọng tâm",
-    "Tiềm năng lớn", "Giải pháp hiệu quả", "Tác động tích cực", "Sự kiên trì", "Nhận thức"
-]
-
-FALLBACK_WORDS_POOL = [
-    "resilience", "innovate", "experience", "development", "adaptation",
-    "achievement", "environment", "challenge", "opportunity", "strategy",
-    "perspective", "efficiency", "persistance", "solution", "capability"
-]
-
-def generate_distractors(target, source_list, fallback_pool, count=3):
-    options = [target]
-    filtered_source = [x for x in source_list if x and x.lower() != target.lower()]
-    random.shuffle(filtered_source)
-
-    for item in filtered_source:
-        if len(options) >= count + 1: break
-        if item not in options: options.append(item)
-
-    if len(options) < count + 1:
-        shuffled_fallback = random.sample(fallback_pool, len(fallback_pool))
-        for fb in shuffled_fallback:
-            if len(options) >= count + 1: break
-            if fb.lower() not in [x.lower() for x in options]: options.append(fb)
-
-    random.shuffle(options)
-    return options
-
-def prepare_review_question(item):
-    q_types = [
-        "CHOICE_MEANING",
-        "FILL_BLANK",
-        "SPELLING",
-        "CONTEXT_MATCH",
-        "FLASHCARD_TRUE_FALSE",
-        "MEANING_CHOICE",
-    ]
-    chosen_q = random.choice(q_types)
-
-    st.session_state.review_item = item
-    st.session_state.q_type = chosen_q
-    st.session_state.review_start_time = time.time()
-    st.session_state.q_data = {}
-
-    word = item.get("word", "").strip()
-    meaning = item.get("meaning", "").strip()
-    example = item.get("example", "").strip() # Luôn lấy example mới nhất (Phần Q)
-
-    if not example:
-        online_example = fetch_online_example(word)
-        example = online_example if online_example else f"It is important to understand {word}."
-
-    deck_words = [x.get("word", "").strip() for x in st.session_state.deck]
-    deck_meanings = [x.get("meaning", "").strip() for x in st.session_state.deck]
-
-    if chosen_q == "CHOICE_MEANING":
-        options = generate_distractors(meaning, deck_meanings, FALLBACK_MEANINGS_POOL)
-        st.session_state.q_data = {"question": word, "options": options, "answer": meaning}
-
-    elif chosen_q == "FILL_BLANK":
-        # Sử dụng example mới nhất để tạo blank sentence (Phần Q)
-        blank_sentence = re.sub(r"\b" + re.escape(word) + r"\b", "_____", example, flags=re.IGNORECASE)
-        if blank_sentence == example:
-            blank_sentence = f"{example} _____"
-        st.session_state.q_data = {"sentence": blank_sentence, "answer": word, "word": word}
-
-    elif chosen_q == "SPELLING":
-        st.session_state.q_data = {"question": meaning, "answer": word}
-
-    elif chosen_q == "CONTEXT_MATCH":
-        options = generate_distractors(meaning, deck_meanings, FALLBACK_MEANINGS_POOL)
-        st.session_state.q_data = {"context": example, "word": word, "options": options, "answer": meaning}
-
-    elif chosen_q == "FLASHCARD_TRUE_FALSE":
-        is_true = random.choice([True, False])
-        if is_true or not deck_meanings:
-            disp_meaning = meaning
-            ans = True
-        else:
-            other_meanings = [m for m in deck_meanings if m.lower() != meaning.lower()]
-            disp_meaning = random.choice(other_meanings) if other_meanings else random.choice(FALLBACK_MEANINGS_POOL)
-            ans = False
-        st.session_state.q_data = {"word": word, "disp_meaning": disp_meaning, "is_true": ans, "answer": ans}
-
-    elif chosen_q == "MEANING_CHOICE":
-        options = generate_distractors(word, deck_words, FALLBACK_WORDS_POOL)
-        st.session_state.q_data = {"word": word, "question": meaning, "options": options, "answer": word}
-
-# ============================================================
-# 12. TIẾN / LÙI MÓC & XỬ LÝ ĐÁP ÁN (FLOW CHUẨN PHẦN P)
-# ============================================================
-
-def advance_after_correct(item):
-    level = int(item.get("level", 0))
-    hook = int(item.get("hook", 0))
-
-    if level == 0: level, hook = 1, 1
-    elif level < MAX_LEVEL:
-        if hook < 4: hook += 1
-        else: level += 1; hook = 1
-    else:
-        hook = min(4, hook + 1) if hook < 4 else 4
-        level = 5
-
-    item["level"] = level
-    item["hook"] = hook
-    item["interval"] = get_current_interval(item)
-
-def move_back_after_wrong(item):
-    level = int(item.get("level", 0))
-    hook = int(item.get("hook", 0))
-
-    if level == 0: level, hook = 0, 0
-    elif level == 1: hook = max(1, hook - 1)
-    else:
-        if hook > 1: hook -= 1
-        else: level -= 1; hook = 4
-
-    item["level"] = level
-    item["hook"] = hook
-    item["interval"] = get_current_interval(item)
-
-def process_answer(is_correct, correct_ans_text):
-    """
-    Thực hiện chính xác THỨ TỰ XỬ LÝ BẮT BUỘC (Phần P):
-    1. Kiểm tra Đúng/Sai
-    2. Cập nhật review count / correct / wrong
-    3. Cập nhật Level / Hook / Interval
-    4. Lấy New Level
-    5. Gọi AI tạo Example theo New Level
-    6. Lưu item["example"]
-    7. save_deck()
-    8. Bật màn hình RESULT UI + AUTO TTS
-    9. CHỜ người dùng bấm "▶ TIẾP TỤC" (KHÔNG tự nhảy câu tiếp theo)
-    """
-    item = st.session_state.review_item
-    if item is None: return
-
-    response_time = max(0.1, time.time() - st.session_state.review_start_time)
-    now = datetime.now()
-    next_rev = item.get("next_review", now)
-    overdue_hours = (now - next_rev).total_seconds() / 3600.0 if now > next_rev else 0
-
-    # 1 & 2. Thống kê
-    item["review_count"] = int(item.get("review_count", 0)) + 1
-
-    if is_correct:
-        item["correct_count"] = int(item.get("correct_count", 0)) + 1
-        item["last_result"] = "correct"
-        advance_after_correct(item)
-    else:
-        item["wrong_count"] = int(item.get("wrong_count", 0)) + 1
-        item["last_result"] = "wrong"
-        move_back_after_wrong(item)
-        if overdue_hours > 24 and item["level"] > 0:
-            move_back_after_wrong(item)
-
-    item["last_response_time"] = round(response_time, 2)
-    new_interval_hours = get_current_interval(item)
-
-    if new_interval_hours <= 0: item["next_review"] = datetime.now()
-    else: item["next_review"] = datetime.now() + timedelta(hours=new_interval_hours)
-
-    item["interval"] = new_interval_hours
-    new_level = int(item["level"]) # Lấy Level thực tế sau khi update (Phần B6)
-
-    # 3. AI Adaptive Example theo New Level (Phần E, K)
-    # Ngay cả khi AI lỗi, statistics & level vẫn được lưu (Phần O)
-    with st.spinner("🤖 AI đang điều chỉnh câu ví dụ theo trình độ..."):
-        new_example = generate_adaptive_example(item, new_level)
-        if new_example:
-            item["example"] = new_example
-
-    # 4. Lưu lại vào Deck & LocalStorage
-    save_deck()
-
-    # 5. Đóng gói dữ liệu Result UI & Chuyển sang State Hiển Thị Kết Quả (Phần A, D)
-    st.session_state.result_data = {
-        "is_correct": is_correct,
-        "correct_ans_text": correct_ans_text,
-        "word": item["word"],
-        "phonetic": item.get("phonetic", ""),
-        "meaning": item.get("meaning", ""),
-        "example": item.get("example", ""),
-        "level": new_level,
-        "item": dict(item)
-    }
-    st.session_state.show_answer_result = True
-    st.rerun()
-
-def reset_all_to_level_zero():
-    for item in st.session_state.deck:
-        item["level"] = 0
-        item["hook"] = 0
-        item["interval"] = 0
-        item["next_review"] = datetime.now()
-        item["review_count"] = 0
-        item["correct_count"] = 0
-        item["wrong_count"] = 0
-        item["last_response_time"] = None
-        item["last_result"] = None
-
-    st.session_state.review_item = None
-    st.session_state.q_type = None
-    st.session_state.q_data = {}
-    st.session_state.review_started = False
-    st.session_state.show_answer_result = False
-    save_deck()
-
-# ============================================================
-# 13. HEADER & ĐỒNG BỘ BẰNG FILE
-# ============================================================
-
-current_sync_key = get_sync_key()
-
-st.title("🍌 MochiVocab")
-st.caption("Dynamic Golden Time • Học theo cấp và 4 móc ghi nhớ")
-
-with st.expander("☁️ Đồng bộ dữ liệu"):
-    st.subheader("🔑 Mã đồng bộ của bạn")
-    
-    col_k1, col_k2 = st.columns([3, 1])
-    with col_k1:
-        st.code(current_sync_key, language=None)
-    with col_k2:
-        new_k_input = st.text_input("Đổi Key (nếu chuyển sang máy mới):", max_chars=8, placeholder="Key 8 số...").strip().upper()
-        if st.button("Áp dụng Key mới"):
-            if len(new_k_input) == 8:
-                st.session_state.sync_key = new_k_input
-                local_storage.setItem("mochi_sync_key", new_k_input)
-                st.success("✅ Đã cập nhật Key!")
-                time.sleep(0.5)
-                st.rerun()
-            else:
-                st.warning("⚠️ Key phải gồm 8 ký tự.")
-
-    st.caption("Sao chép mã này để nhập vào các máy khác của bạn.")
-    st.markdown("---")
-
-    col_sync1, col_sync2 = st.columns(2)
-
-    with col_sync1:
-        st.markdown("### 📤 Xuất dữ liệu")
-        st.write("Tạo file đồng bộ đã mã hóa bằng mã Key của bạn.")
-        
-        sync_file_bytes = export_sync_file(current_sync_key, st.session_state.deck)
-        filename = f"mochivocab_sync_{current_sync_key}.mochi"
-
-        st.download_button(
-            label="⬇️ Tải file đồng bộ",
-            data=sync_file_bytes,
-            file_name=filename,
-            mime="application/octet-stream",
-            use_container_width=True
-        )
-
-    with col_sync2:
-        st.markdown("### 📥 Nhập dữ liệu")
-        uploaded_file = st.file_uploader("Chọn file đồng bộ (.mochi):", type=["mochi", "json"], key="sync_uploader")
-
-        if uploaded_file is not None:
-            file_bytes = uploaded_file.read()
-            is_valid, msg, imported_deck = validate_and_decrypt_sync_file(file_bytes, current_sync_key)
-            
-            if not is_valid:
-                st.error(msg)
-            else:
-                st.success(msg)
-                local_copy = [dict(x) for x in st.session_state.deck]
-                merged_deck, count_local, count_imp, count_dup, count_final = merge_decks(local_copy, imported_deck)
-                
-                st.session_state.deck = merged_deck
-                save_deck()
-
-                st.success("✅ Gộp dữ liệu thành công!")
-                st.info(
-                    f"• Dữ liệu hiện tại: **{count_local}**\n\n"
-                    f"• Dữ liệu từ file: **{count_imp}**\n\n"
-                    f"• Trùng lặp (đã gộp): **{count_dup}**\n\n"
-                    f"• Sau khi gộp: **{count_final}** từ"
-                )
-                time.sleep(1.5)
-                st.rerun()
-
-now = datetime.now()
-due_count = sum(1 for x in st.session_state.deck if x.get("next_review") and x["next_review"] <= now)
-
-tab_options = ["⏰ Ôn Tập", "🔍 Tra Từ Mới", "📄 Quét Bài Đọc", "📋 Sổ Tay"]
-tab_labels = {
-    "⏰ Ôn Tập": f"⏰ Ôn Tập ({due_count})",
-    "🔍 Tra Từ Mới": "🔍 Tra Từ Mới",
-    "📄 Quét Bài Đọc": "📄 Quét Bài Đọc",
-    "📋 Sổ Tay": f"📋 Sổ Tay ({len(st.session_state.deck)})",
-}
-
-selected_tab = st.radio(
-    "Navigation",
-    options=tab_options,
-    format_func=lambda x: tab_labels[x],
-    key="active_tab",
-    horizontal=True,
-    label_visibility="collapsed"
-)
-
-st.markdown("---")
-
-# ============================================================
-# 14. TAB ÔN TẬP (VỚI MÀN HÌNH KẾT QUẢ KHIẾN HỌC VIÊN TẬP TRUNG)
-# ============================================================
-
-if selected_tab == "⏰ Ôn Tập":
-    st.subheader("⏰ Ôn tập đúng Thời Điểm Vàng")
-    now = datetime.now()
-    due_items = [x for x in st.session_state.deck if x.get("next_review") and x["next_review"] <= now]
-
-    if not st.session_state.deck:
-        st.warning("📚 Sổ tay đang trống.")
-        st.write("Hãy sang **🔍 Tra Từ Mới** hoặc **📄 Quét Bài Đọc** để thêm từ.")
-
-    elif not due_items and not st.session_state.show_answer_result:
-        st.session_state.review_started = False
-        st.session_state.review_item = None
-        st.session_state.q_type = None
-        st.session_state.q_data = {}
-
-        next_item = min(st.session_state.deck, key=lambda x: x["next_review"])
-        remaining = (next_item["next_review"] - datetime.now()).total_seconds()
-
-        st.success("🎉 Hiện tại không me từ nào đến Thời Điểm Vàng.")
-
-        col1, col2 = st.columns(2)
-        with col1: st.metric("Từ tiếp theo", next_item["word"].upper())
-        with col2: st.metric("Cấp", next_item["level"])
-
-        st.info(f"⏰ Còn khoảng **{format_remaining(remaining)}**")
-
-    else:
-        # ----------------------------------------------------
-        # PHẦN A2 - A4: UI KẾT QUẢ TRUNG GIAN SAU KHI TRẢ LỜI
-        # ----------------------------------------------------
-        if st.session_state.show_answer_result:
-            res_data = st.session_state.get("result_data", {})
-            is_correct = res_data.get("is_correct", False)
-            word = res_data.get("word", "")
-            phonetic = res_data.get("phonetic", "")
-            meaning = res_data.get("meaning", "")
-            example = res_data.get("example", "")
-            level = res_data.get("level", 1)
-            item = res_data.get("item", {})
-
-            # Lấy speed và text phát âm chuẩn level mới (Phần B, C)
-            speed = get_pronunciation_speed(level)
-            text_to_speak = get_pronunciation_text(item, level)
-
-            # TỰ ĐỘNG PHÁT ÂM NGAY KHI HIỂN THỊ UI (Phần A4, R)
-            speak_text(text_to_speak, speed=speed, auto_play=True)
-
-            # UI Kết Quả phong cách Tra Từ gọn gàng
-            with st.container():
-                st.markdown("<br>", unsafe_allow_html=True)
-                if is_correct:
-                    st.success("### ✅ Chính xác!")
-                else:
-                    st.error("### ❌ Chưa đúng")
-                    if res_data.get("correct_ans_text"):
-                        st.caption(f"Đáp án đúng: **{res_data.get('correct_ans_text')}**")
-
-                st.markdown(f"## **{word}**")
-                if phonetic:
-                    st.markdown(f"`{phonetic}`")
-                
-                st.markdown(f"### **{meaning}**")
-                
-                if example:
-                    st.info(f"📖 *{example}*")
-
-                st.caption(f"🔊 *Đang tự động phát âm... (Tốc độ {speed}x)*")
-
-                # NÚT NGHE LẠI (Phần T)
-                btn_label = "🔊 Nghe lại câu ví dụ" if level >= 5 else "🔊 Nghe lại từ"
-                if st.button(btn_label, key="btn_replay_audio"):
-                    speak_text(text_to_speak, speed=speed, auto_play=True)
-
-                st.markdown("---")
-                
-                # NÚT ▶ TIẾP TỤC BẮT BUỘC (Phần A1, D)
-                if st.button("▶ TIẾP TỤC", type="primary", use_container_width=True, key="btn_continue_next"):
-                    st.session_state.show_answer_result = False
-                    st.session_state.result_data = {}
-                    
-                    # Chuẩn bị câu hỏi mới hoặc hoàn thành review
-                    due_now = [x for x in st.session_state.deck if x.get("next_review") and x["next_review"] <= datetime.now()]
-                    if due_now:
-                        min_level = min(x.get("level", 0) for x in due_now)
-                        candidates = [x for x in due_now if x.get("level", 0) == min_level]
-                        next_item = random.choice(candidates)
-                        prepare_review_question(next_item)
-                    else:
-                        st.session_state.review_started = False
-                        st.session_state.review_item = None
-                    st.rerun()
-
-        # ----------------------------------------------------
-        # BẮT ĐẦU HOẶC HIỂN THỊ CÂU HỎI REVIEW
-        # ----------------------------------------------------
-        elif not st.session_state.review_started:
-            st.success(f"🔥 Có **{len(due_items)} từ** đang đến Thời Điểm Vàng.")
-            st.markdown("---")
-            st.markdown("### 🧠 Sẵn sàng ôn tập?\nMochiVocab sẽ chọn một từ đang đến giờ và bắt đầu tính thời gian phản hồi.")
-
-            if st.button("▶️ BẮT ĐẦU ÔN TẬP", type="primary", use_container_width=True, key="start_review"):
-                min_level = min(x.get("level", 0) for x in due_items)
-                candidates = [x for x in due_items if x.get("level", 0) == min_level]
-                item = random.choice(candidates)
-
-                st.session_state.review_started = True
-                prepare_review_question(item)
-                st.rerun()
-
-        else:
-            current_item = st.session_state.review_item
-            if current_item is None:
-                min_level = min(x.get("level", 0) for x in due_items)
-                candidates = [x for x in due_items if x.get("level", 0) == min_level]
-                item = random.choice(candidates)
-
-                prepare_review_question(item)
-                st.rerun()
-
-            item = st.session_state.review_item
-            q_type = st.session_state.q_type
-            q_data = st.session_state.q_data
-
-            if st.button("⏹️ Dừng ôn tập", key="stop_review"):
-                st.session_state.review_started = False
-                st.session_state.review_item = None
-                st.session_state.q_type = None
-                st.session_state.q_data = {}
-                st.session_state.review_start_time = 0
-                st.rerun()
-
-            level = int(item.get("level", 0))
-            hook = int(item.get("hook", 0))
-            progress = hook / 4 if level > 0 else 0
-
-            st.progress(progress)
-
-            col1, col2 = st.columns(2)
-            with col1: st.caption(get_level_name(level))
-            with col2: st.caption(f"Móc: {hook}/4" if level > 0 else "Móc: 0/4")
-
-            if level == 0: st.caption("⏰ Khoảng ôn: **0 giờ — Từ mới**")
-            else:
-                current_hours = get_current_interval(item)
-                st.caption(f"📐 Móc hiện tại: **{format_hours(current_hours)}**")
-
-            st.markdown("---")
-
-            # 1. CHOICE MEANING
-            if q_type == "CHOICE_MEANING":
-                st.markdown("### 🎲 TRẮC NGHIỆM CHỌN NGHĨA")
-                st.info(f"Từ: **{item['word'].upper()}** `{item.get('phonetic', '')}`")
-
-                st.write("Chọn nghĩa tiếng Việt:")
-                for index, option in enumerate(q_data.get("options", [])):
-                    if st.button(option, key=f"choice_{item['id']}_{index}"):
-                        process_answer(option.strip().lower() == item["meaning"].strip().lower(), item["meaning"])
-
-            # 2. FILL BLANK
-            elif q_type == "FILL_BLANK":
-                st.markdown("### ✏️ ĐIỀN TỪ VÀO CHỖ TRỐNG")
-                st.info(f"**{q_data.get('sentence', '')}**")
-                
-                hint = get_word_hint(item['word'], level_tag=item.get("level", 1), wrong_count=item.get("wrong_count", 0))
-                st.caption(f"💡 Gợi ý nguyên âm: `{hint}`")
-
-                user_ans = st.text_input("Từ còn thiếu:", key=f"fill_{item['id']}")
-                if st.button("Xác Nhận", type="primary", key=f"fill_submit_{item['id']}"):
-                    process_answer(user_ans.strip().lower() == item["word"].strip().lower(), item["word"].upper())
-
-            # 3. SPELLING
-            elif q_type == "SPELLING":
-                st.markdown("### ✍️ LUYỆN CHÍNH TẢ")
-                st.info(f"Nghĩa tiếng Việt: **{item['meaning'].upper()}**")
-
-                hint = get_word_hint(item['word'], level_tag=item.get("level", 1), wrong_count=item.get("wrong_count", 0))
-                st.caption(f"💡 Gợi ý nguyên âm: `{hint}`")
-
-                user_ans = st.text_input("Gõ từ tiếng Anh:", key=f"spell_{item['id']}")
-                if st.button("Xác Nhận", type="primary", key=f"spell_submit_{item['id']}"):
-                    process_answer(user_ans.strip().lower() == item["word"].strip().lower(), item["word"].upper())
-
-            # 4. CONTEXT MATCH
-            elif q_type == "CONTEXT_MATCH":
-                st.markdown("### 🧠 NGHĨA THEO NGỮ CẢNH")
-                st.info(f'"{q_data.get("context", "")}"')
-                st.write(f'Từ **{item["word"].upper()}** có nghĩa là gì?')
-
-                for index, option in enumerate(q_data.get("options", [])):
-                    if st.button(option, key=f"context_{item['id']}_{index}"):
-                        process_answer(option.strip().lower() == item["meaning"].strip().lower(), item["meaning"])
-
-            # 5. TRUE / FALSE
-            elif q_type == "FLASHCARD_TRUE_FALSE":
-                st.markdown("### ⚡ FLASHCARD PHẢN XẠ")
-                st.info(f"Từ: **{item['word']}**\n\nNghĩa: **{q_data.get('disp_meaning', '')}**")
-                st.write("Thông tin trên đúng hay sai?")
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("✅ ĐÚNG", type="primary", key=f"true_{item['id']}"):
-                        process_answer(q_data["is_true"], "ĐÚNG" if q_data["is_true"] else "SAI")
-                with col2:
-                    if st.button("❌ SAI", key=f"false_{item['id']}"):
-                        process_answer(not q_data["is_true"], "SAI" if not q_data["is_true"] else "ĐÚNG")
-
-            # 6. MEANING CHOICE
-            elif q_type == "MEANING_CHOICE":
-                st.markdown("### 🔤 NGHĨA → CHỌN TỪ TIẾNG ANH")
-                st.info(f"Nghĩa: **{q_data.get('question', '').upper()}**")
-                st.write("Chọn từ tiếng Anh:")
-
-                for index, option in enumerate(q_data.get("options", [])):
-                    if st.button(option.upper(), key=f"mchoice_{item['id']}_{index}"):
-                        process_answer(option.strip().lower() == item["word"].strip().lower(), item["word"].upper())
-
-# ============================================================
-# 15. TAB TRA TỪ MỚI
-# ============================================================
-
-elif selected_tab == "🔍 Tra Từ Mới":
-    st.subheader("🔍 Tra cứu & Thêm từ mới (AI Trợ Lý)")
-
-    word_input = st.text_input("Nhập từ tiếng Anh:", placeholder="Ví dụ: resilience, innovate...").strip().lower()
-
-    if st.button("🔎 Tra Từ Với AI", type="primary"):
-        if word_input:
-            with st.spinner("🤖 AI đang phân tích nghĩa, phiên âm và ví dụ..."):
-                prompt = f"""
-Hãy đóng vai từ điển Anh-Việt cao cấp. Phân tích từ tiếng Anh: "{word_input}".
-Trả về duy nhất định dạng JSON thô (không bọc trong markdown):
-{{
-  "phonetic": "/phiên âm IPA/",
-  "meaning": "Nghĩa tiếng Việt chuẩn, ngắn gọn",
-  "example": "1 câu ví dụ tiếng Anh ngắn, tự nhiên"
-}}
-"""
-                res = call_llm_api(prompt)
-                if res:
-                    try:
-                        ai_data = json.loads(res)
-                        st.session_state.temp_word = {
-                            "word": word_input,
-                            "phonetic": ai_data.get("phonetic", ""),
-                            "meaning": ai_data.get("meaning", ""),
-                            "example": ai_data.get("example", f"It is important to understand {word_input}.")
-                        }
-                    except Exception:
-                        st.error("❌ Lỗi cấu trúc JSON từ AI. Vui lòng bấm thử lại!")
-                else:
-                    st.error("❌ Không thể kết nối với AI API.")
-
-    data = st.session_state.get("temp_word")
-    if data and data.get("word") == word_input:
-        st.markdown("---")
-        st.info(f"**{data['word'].upper()}** `{data.get('phonetic', '')}`")
-
-        manual_meaning = st.text_input("Chỉnh sửa nghĩa tiếng Việt:", value=data.get("meaning", ""), key=f"manual_m_{data['word']}")
-        manual_example = st.text_area("Chỉnh sửa câu ví dụ:", value=data.get("example", ""), height=70, key=f"manual_e_{data['word']}")
-
-        data["meaning"] = manual_meaning.strip()
-        data["example"] = manual_example.strip()
-        st.session_state.temp_word = data
-
-        if st.button("➕ Thêm vào Sổ Tay", key="add_new_word", type="primary"):
-            exists = any(x.get("word", "").strip().lower() == data["word"].strip().lower() for x in st.session_state.deck)
-            if exists: st.warning("⚠️ Từ này đã có trong Sổ Tay.")
-            elif not data.get("meaning", "").strip(): st.error("⚠️ Cần có nghĩa tiếng Việt trước khi lưu!")
-            else:
-                new_item = {
-                    "id": get_next_id(),
-                    "word": data["word"],
-                    "phonetic": data.get("phonetic", ""),
-                    "meaning": data["meaning"],
-                    "example": data["example"],
-                    "level": 0, "hook": 0, "interval": 0,
-                    "review_count": 0, "correct_count": 0, "wrong_count": 0,
-                    "last_response_time": None, "last_result": None,
-                    "next_review": datetime.now()
-                }
-                st.session_state.deck.append(new_item)
-                save_deck()
-                st.success(f"✅ Đã thêm **{data['word'].upper()}** vào Sổ Tay!")
-                time.sleep(0.5)
-                st.rerun()
-
-# ============================================================
-# 16. TAB QUÉT BÀI ĐỌC
-# ============================================================
-
-elif selected_tab == "📄 Quét Bài Đọc":
-    st.subheader("📄 Quét Bài Đọc & Lọc Từ Vựng Theo Trình Độ (A1 - C2)")
-    st.caption("AI sẽ phân tích bài đọc, lọc ra các từ vựng thuộc đúng cấp độ bạn chọn và giải nghĩa chuẩn theo ngữ cảnh.")
-
-    input_text = st.text_area("Nhập bài đọc tiếng Anh:", placeholder="Dán đoạn văn tiếng Anh vào đây...", height=160)
-
-    col_b1, col_b2 = st.columns([2, 1])
-    with col_b1:
-        target_band = st.selectbox(
-            "🎯 Chọn trình độ từ vựng muốn lọc:",
-            options=[
-                "🟢 Level A1 - Nhập môn",
-                "🟢 Level A2 - Sơ cấp",
-                "🟡 Level B1 / IELTS 4.0 - 5.0",
-                "🟡 Level B2 / IELTS 5.5 - 6.5",
-                "🔴 Level C1 / IELTS 7.0 - 8.0",
-                "🔴 Level C2 / IELTS 8.5 - 9.0"
-            ],
-            index=3
-        )
-    with col_b2:
-        batch_size = st.selectbox("Số từ / Batch:", options=[10, 15, 20], index=0)
-
-    if st.button("🚀 AI Phân Tích & Lọc Từ", type="primary", use_container_width=True):
-        if not input_text.strip():
-            st.warning("⚠️ Vui lòng dán bài đọc trước khi phân tích!")
-        else:
-            with st.spinner(f"🤖 AI đang đọc bài văn và lọc từ vựng trình độ {target_band}..."):
-                existing_words = [item.get("word", "").strip().lower() for item in st.session_state.deck]
-
-                prompt_band = f"""
-Bạn là chuyên gia ngôn ngữ tiếng Anh. Dựa vào bài đọc sau:
----
-{input_text[:2000]}
----
-
-Lọc ra các từ vựng thuộc đúng trình độ: **{target_band}**.
-Bỏ qua các từ ĐÃ CÓ trong danh sách bên dưới:
-{json.dumps(existing_words[:100])}
-
-Output duy nhất dạng JSON Array:
-[
-  {{
-    "word": "từ tiếng anh",
-    "phonetic": "/phiên âm/",
-    "meaning": "nghĩa việt chuẩn ngữ cảnh bài đọc",
-    "example": "câu ví dụ ngắn",
-    "level_tag": "B2"
-  }}
-]
-Chỉ trả về JSON thô.
-"""
-                res = call_llm_api(prompt_band)
-                if res:
-                    try:
-                        scanned_data = json.loads(res)
-                        st.session_state.all_scanned_words = scanned_data
-                        st.session_state.current_batch_index = 0
-                        st.success(f"✅ Tìm thấy {len(scanned_data)} từ thuộc trình độ {target_band}!")
-                    except Exception:
-                        st.error("❌ Lỗi cấu trúc JSON từ AI. Vui lòng thử lại!")
-                else:
-                    st.error("❌ Không thể kết nối tới AI API.")
-
-    if st.session_state.get("all_scanned_words"):
-        all_items = st.session_state.all_scanned_words
-        total_items = len(all_items)
-        total_batches = (total_items + batch_size - 1) // batch_size
-        idx = st.session_state.current_batch_index
-
-        st.markdown("---")
-        st.info(f"📊 Tìm thấy **{total_items} từ**. Đang xem **Batch {idx + 1}/{total_batches}**")
-
-        col_nav1, col_nav2 = st.columns(2)
-        with col_nav1:
-            if st.button("⬅️ Batch trước") and idx > 0:
-                st.session_state.current_batch_index -= 1
-                st.rerun()
-        with col_nav2:
-            if st.button("Batch tiếp ➡️") and idx < total_batches - 1:
-                st.session_state.current_batch_index += 1
-                st.rerun()
-
-        start_i = idx * batch_size
-        end_i = min((idx + 1) * batch_size, total_items)
-        current_batch = all_items[start_i:end_i]
-
-        st.markdown("### ✏️ Duyệt & Chỉnh Sửa Batch Này:")
-
-        final_list = []
-        for i, item in enumerate(current_batch):
-            col_w, col_m = st.columns([2, 3])
-            with col_w:
-                st.markdown(f"**{item['word'].upper()}** `{item.get('phonetic', '')}`")
-                st.caption(f"🏷️ Trình độ: **{item.get('level_tag', 'N/A')}**")
-            with col_m:
-                meaning_val = st.text_input(
-                    f"Nghĩa ({item['word']}):",
-                    value=item.get('meaning', ''),
-                    key=f"cefr_m_{idx}_{i}"
-                )
-                item['meaning'] = meaning_val
-            final_list.append(item)
-
-        if st.button("💾 LƯU BATCH NÀY VÀO SỔ TAY", type="primary", use_container_width=True):
-            saved_count = 0
-            for item in final_list:
-                if item["meaning"].strip():
-                    new_item = {
-                        "id": get_next_id(),
-                        "word": item["word"],
-                        "phonetic": item.get("phonetic", ""),
-                        "meaning": item["meaning"].strip(),
-                        "example": item.get("example", f"It is important to understand {item['word']}."),
-                        "level": 0, "hook": 0, "interval": 0,
-                        "review_count": 0, "correct_count": 0, "wrong_count": 0,
-                        "last_response_time": None, "last_result": None,
-                        "next_review": datetime.now()
-                    }
-                    st.session_state.deck.append(new_item)
-                    saved_count += 1
-
-            save_deck()
-            st.success(f"✅ Đã thêm **{saved_count} từ** vào Sổ Tay!")
-            st.session_state.all_scanned_words = [
-                w for w in st.session_state.all_scanned_words 
-                if w['word'] not in [x['word'] for x in final_list]
-            ]
-            time.sleep(0.8)
-            st.rerun()
-
-# ============================================================
-# 17. TAB SỔ TAY
-# ============================================================
-
-elif selected_tab == "📋 Sổ Tay":
-    st.subheader("📋 Sổ tay từ vựng")
-
-    if st.session_state.deck:
-        total = len(st.session_state.deck)
-        due = sum(1 for x in st.session_state.deck if x.get("next_review") and x["next_review"] <= datetime.now())
-        mastered = sum(1 for x in st.session_state.deck if x.get("level", 0) == 5 and x.get("hook", 0) == 4)
-
-        col1, col2, col3 = st.columns(3)
-        with col1: st.metric("Tổng từ", total)
-        with col2: st.metric("Cần ôn", due)
-        with col3: st.metric("Cấp 5 • Móc 4", mastered)
-
-        st.markdown("---")
-
-        col_btn_merge, col_btn_undo = st.columns([2, 1])
-        with col_btn_merge:
-            if st.button("🤖 Tự động gộp từ trung lập", use_container_width=True, key="btn_trigger_auto_merge"):
-                neutral_items = [x for x in st.session_state.deck if int(x.get("level", 0)) == 0]
-                total_neutral = len(neutral_items)
-
-                if total_neutral == 0:
-                    st.info("ℹ️ Không có từ trung lập nào cần gộp.")
-                    st.session_state.auto_merge_neutral_preview = None
-                else:
-                    groups = {}
-                    for item in neutral_items:
-                        key = item.get("word", "").strip().lower()
-                        if key:
-                            groups.setdefault(key, []).append(item)
-
-                    mergable_items_count = sum(len(group) for group in groups.values() if len(group) > 1)
-                    non_mergable_items_count = total_neutral - mergable_items_count
-
-                    st.session_state.auto_merge_neutral_preview = {
-                        "total_neutral": total_neutral,
-                        "mergable": mergable_items_count,
-                        "non_mergable": non_mergable_items_count,
-                        "groups": groups
-                    }
-
-        with col_btn_undo:
-            if st.session_state.get("auto_merge_neutral_undo_backup") is not None:
-                if st.button("↩️ Hoàn tác", use_container_width=True, key="btn_undo_merge"):
-                    st.session_state.deck = [dict(x) for x in st.session_state.auto_merge_neutral_undo_backup]
-                    st.session_state.auto_merge_neutral_undo_backup = None
-                    save_deck()
-                    st.success("✅ Đã khôi phục lại trạng thái dữ liệu trước khi gộp!")
-                    time.sleep(0.8)
-                    st.rerun()
-
-        preview_data = st.session_state.get("auto_merge_neutral_preview")
-        if preview_data:
-            st.info(
-                f"🤖 **Tìm thấy:**\n\n"
-                f"• Từ trung lập: **{preview_data['total_neutral']}**\n"
-                f"• Có thể gộp: **{preview_data['mergable']}**\n"
-                f"• Không thể gộp: **{preview_data['non_mergable']}**"
-            )
-
-            col_cf1, col_cf2 = st.columns(2)
-            with col_cf1:
-                if st.button("[ Tiếp tục gộp ]", type="primary", use_container_width=True, key="btn_confirm_merge"):
-                    st.session_state.auto_merge_neutral_undo_backup = [dict(x) for x in st.session_state.deck]
-
-                    non_neutral_deck = [x for x in st.session_state.deck if int(x.get("level", 0)) > 0]
-                    
-                    merged_neutral_deck = []
-                    for word_key, group in preview_data["groups"].items():
-                        if len(group) == 1:
-                            merged_neutral_deck.append(group[0])
-                        else:
-                            base_item = group[0]
-                            for other_item in group[1:]:
-                                base_item = merge_items(base_item, other_item)
-                            merged_neutral_deck.append(base_item)
-
-                    new_deck = non_neutral_deck + merged_neutral_deck
-                    st.session_state.deck = new_deck
-                    save_deck()
-
-                    merged_count = preview_data["mergable"]
-                    unchanged_count = preview_data["non_mergable"]
-                    before_count = preview_data["total_neutral"]
-                    after_count = len(new_deck)
-
-                    st.session_state.auto_merge_neutral_preview = None
-                    st.success(
-                        f"✅ **Đã gộp từ trung lập**\n\n"
-                        f"• Trước: {before_count}\n"
-                        f"• Đã gộp: {merged_count}\n"
-                        f"• Không thay đổi: {unchanged_count}\n"
-                        f"• Sau khi gộp: {after_count}"
-                    )
-                    time.sleep(1.2)
-                    st.rerun()
-
-            with col_cf2:
-                if st.button("[ Hủy ]", use_container_width=True, key="btn_cancel_merge"):
-                    st.session_state.auto_merge_neutral_preview = None
-                    st.rerun()
-
-        st.markdown("---")
-
-        st.session_state.search_filter = st.text_input(
-            "🔎 Tìm kiếm từ hoặc nghĩa trong sổ tay:",
-            value=st.session_state.search_filter,
-            placeholder="Gõ từ tiếng Anh hoặc nghĩa tiếng Việt..."
-        ).strip()
-
-        filtered_deck = st.session_state.deck
-        if st.session_state.search_filter:
-            kw = st.session_state.search_filter.lower()
-            filtered_deck = [
-                x for x in st.session_state.deck
-                if kw in x.get("word", "").lower() or kw in x.get("meaning", "").lower()
-            ]
-
-        table_data = []
-        for item in filtered_deck:
-            next_review = item.get("next_review")
-            remaining = (next_review - datetime.now()).total_seconds() if isinstance(next_review, datetime) else 0
-            status = "🔥 Sẵn sàng ôn!" if remaining <= 0 else f"⏳ {format_remaining(remaining)}"
-
-            correct_count = int(item.get("correct_count", 0))
-            wrong_count = int(item.get("wrong_count", 0))
-            accuracy_total = correct_count + wrong_count
-            accuracy_text = f"{correct_count / accuracy_total * 100:.0f}%" if accuracy_total > 0 else "—"
-
-            level = int(item.get("level", 0))
-            hook = int(item.get("hook", 0))
-
-            hook_text = "Cấp 0" if level == 0 else f"Cấp {level} • Móc {hook}/4"
-            interval_text = "0 giờ" if level == 0 else format_hours(get_current_interval(item))
-
-            table_data.append({
-                "ID": item.get("id"),
-                "Từ": item.get("word", "").upper(),
-                "Nghĩa": item.get("meaning", ""),
-                "Cấp": hook_text,
-                "Trạng thái": get_level_name(level),
-                "Móc": interval_text,
-                "Độ chính xác": accuracy_text,
-                "Số lần ôn": item.get("review_count", 0),
-                "Tiếp theo": status,
-            })
-
-        st.dataframe(table_data, use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-
-        with st.expander("🛠️ Quản lý & Chỉnh sửa chi tiết từng từ"):
-            word_options = {f"{x['word'].upper()} - {x['meaning']}": x['id'] for x in st.session_state.deck}
-            selected_word_str = st.selectbox("Chọn từ cần sửa / xóa:", options=list(word_options.keys()))
-
-            if selected_word_str:
-                selected_id = word_options[selected_word_str]
-                target_item = next((x for x in st.session_state.deck if x["id"] == selected_id), None)
-
-                if target_item:
-                    col_edit1, col_edit2 = st.columns(2)
-                    with col_edit1:
-                        new_meaning_val = st.text_input("Sửa Nghĩa tiếng Việt:", value=target_item["meaning"], key=f"edit_m_{selected_id}")
-                    with col_edit2:
-                        new_example_val = st.text_input("Sửa Cụm từ / Câu ví dụ:", value=target_item["example"], key=f"edit_e_{selected_id}")
-
-                    c_act1, c_act2, c_act3 = st.columns([1, 1, 1])
-                    with c_act1:
-                        if st.button("💾 Lưu thay đổi", type="primary", key=f"save_item_{selected_id}"):
-                            target_item["meaning"] = new_meaning_val.strip()
-                            target_item["example"] = new_example_val.strip()
-                            save_deck()
-                            st.success("✅ Đã cập nhật từ vựng thành công!")
-                            time.sleep(0.5)
-                            st.rerun()
-
-                    with c_act2:
-                        if st.button("🤖 AI Reset Từ Này", key=f"ai_reset_item_{selected_id}"):
-                            with st.spinner("🤖 AI đang tạo mới nghĩa & ví dụ..."):
-                                prompt_single = f"""
-Cung cấp nghĩa tiếng Việt ngắn gọn và 1 câu ví dụ đơn giản cho từ: "{target_item['word']}".
-Trả về duy nhất JSON:
-{{ "meaning": "nghĩa tiếng việt", "example": "câu ví dụ tiếng anh" }}
-"""
-                                res = call_llm_api(prompt_single)
-                                if res:
-                                    try:
-                                        res_json = json.loads(res)
-                                        target_item["meaning"] = res_json.get("meaning", target_item["meaning"])
-                                        target_item["example"] = res_json.get("example", target_item["example"])
-                                        save_deck()
-                                        st.success(f"✅ Đã reset nghĩa & ví dụ cho từ {target_item['word'].upper()}!")
-                                        time.sleep(0.5)
-                                        st.rerun()
-                                    except Exception: st.error("❌ Lỗi xử lý JSON.")
-
-                    with c_act3:
-                        if st.button("🗑️ Xóa từ này", key=f"del_item_{selected_id}"):
-                            st.session_state.deck = [x for x in st.session_state.deck if x["id"] != selected_id]
-                            save_deck()
-                            st.success("✅ Đã xóa từ khỏi Sổ Tay!")
-                            time.sleep(0.5)
-                            st.rerun()
-
-        st.markdown("---")
-
-        if st.button("🔄 RESET ALL VỀ CẤP 0", use_container_width=True, key="reset_all_words"):
-            reset_all_to_level_zero()
-            st.success("✅ Đã reset toàn bộ từ về Cấp 0.")
-            time.sleep(0.5)
-            st.rerun()
-
-        st.markdown("---")
-
-        if st.button("🗑️ Xóa toàn bộ từ vựng", key="delete_all_words"):
-            st.session_state.deck = []
-            st.session_state.review_item = None
-            st.session_state.review_started = False
-            st.session_state.q_type = None
-            st.session_state.q_data = {}
-            st.session_state.temp_word = None
-            st.session_state.show_answer_result = False
-            save_deck()
-            st.success("Đã xóa toàn bộ dữ liệu.")
-            time.sleep(0.5)
-            st.rerun()
-
-    else:
-        st.info("📚 Sổ tay đang trống.")
-
-# ============================================================
-# 18. FOOTER
-# ============================================================
-
-st.markdown("---")
-st.caption("🍌 MochiVocab • Dynamic Golden Time (100% Offline Sync)")
+            cleaned = re.sub(r"\s*
