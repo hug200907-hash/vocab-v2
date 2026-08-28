@@ -5,6 +5,7 @@ import os
 import re
 import urllib.parse
 import urllib.request
+import requests
 from datetime import datetime, timedelta
 
 import streamlit as st
@@ -17,12 +18,15 @@ from openai import OpenAI
 # ============================================================
 
 st.set_page_config(
-    page_title="MochiVocab AI - P2P Sync",
+    page_title="MochiVocab AI",
     page_icon="🍌",
-    layout="wide"
+    layout="centered"
 )
 
 local_storage = LocalStorage()
+
+# API công cộng miễn phí dùng làm CSDL Cloud cho Sync Key (JSONBin Public hoặc tương đương)
+PUBLIC_SYNC_API = "https://api.jsonbin.io/v3/b"
 
 # ============================================================
 # 2. HỆ THỐNG CẤP + MÓC
@@ -56,6 +60,8 @@ DEFAULT_STATE = {
     "search_filter": "",
     "all_scanned_words": [],
     "current_batch_index": 0,
+    "device_key": "",
+    "cloud_bin_id": "",
     "p2p_room_id": "room-888",
 }
 
@@ -93,6 +99,10 @@ def get_word_hint(word):
     hint_pattern = f"{word[0]} " + " ".join(["_"] * (len(word) - 2)) + f" {word[-1]}"
     return f"{hint_pattern} ({len(word)} ký tự)"
 
+# ============================================================
+# 5. THÔNG TIN CẤP / MÓC
+# ============================================================
+
 def get_level_name(level):
     names = {
         0: "🆕 Cấp 0 — Từ mới",
@@ -122,7 +132,7 @@ def get_current_interval(item):
     return get_hook_hours(item)
 
 # ============================================================
-# 5. CHUẨN HÓA ITEM & LƯU LOCAL
+# 6. CHUẨN HÓA ITEM & LOAD/SAVE (LOCAL + CLOUD SYNC)
 # ============================================================
 
 def normalize_item(item):
@@ -176,8 +186,68 @@ def normalize_item(item):
     item["interval"] = get_current_interval(item)
     return item
 
+# --- CLOUD SYNC HELPERS ---
+def sync_push_to_cloud(key, deck_data):
+    if not key or len(key) != 8:
+        return False
+    
+    payload = json.dumps(deck_data, ensure_ascii=False).encode('utf-8')
+    headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+    }
+    
+    try:
+        url1 = f"https://keyvalue.xyz/site/st_mochi_v1_{key}"
+        init_req = urllib.request.Request(f"https://keyvalue.xyz/new/st_mochi_v1_{key}", method='POST')
+        try: urllib.request.urlopen(init_req, timeout=3)
+        except Exception: pass
+            
+        req1 = urllib.request.Request(url1, data=payload, headers=headers, method='POST')
+        with urllib.request.urlopen(req1, timeout=5) as resp:
+            if resp.status in (200, 201): return True
+    except Exception: pass
+
+    try:
+        url2 = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
+        req2 = urllib.request.Request(url2, data=payload, headers=headers, method='POST')
+        with urllib.request.urlopen(req2, timeout=6) as resp:
+            if resp.status in (200, 201): return True
+    except Exception: pass
+
+    return False
+
+def sync_pull_from_cloud(key):
+    if not key or len(key) != 8: return None
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+
+    try:
+        url1 = f"https://keyvalue.xyz/site/st_mochi_v1_{key}"
+        req1 = urllib.request.Request(url1, headers=headers)
+        with urllib.request.urlopen(req1, timeout=5) as resp:
+            data = resp.read().decode('utf-8')
+            if data and data != "null" and len(data) > 5:
+                return json.loads(data)
+    except Exception: pass
+
+    try:
+        url2 = f"https://kvdb.io/st_mochivocab_app_2024/{key}"
+        req2 = urllib.request.Request(url2, headers=headers)
+        with urllib.request.urlopen(req2, timeout=5) as resp:
+            data = resp.read().decode('utf-8')
+            if data and data != "null" and len(data) > 5:
+                return json.loads(data)
+    except urllib.error.HTTPError as e:
+        if e.code == 404: return "NOT_FOUND"
+    except Exception: pass
+
+    return None
+
 if not st.session_state.data_loaded:
     try:
+        saved_key = local_storage.getItem("mochi_device_key")
+        if saved_key: st.session_state.device_key = str(saved_key)
+        
         saved_data = local_storage.getItem("mochi_deck_data")
         if saved_data:
             items = json.loads(saved_data)
@@ -195,6 +265,8 @@ def save_deck():
         serializable_deck.append(copy_item)
     try:
         local_storage.setItem("mochi_deck_data", json.dumps(serializable_deck, ensure_ascii=False))
+        if st.session_state.device_key and len(serializable_deck) > 0:
+            sync_push_to_cloud(st.session_state.device_key, serializable_deck)
     except Exception: pass
 
 def get_next_id():
@@ -203,14 +275,18 @@ def get_next_id():
     return max(ids) + 1 if ids else 1
 
 # ============================================================
-# 6. LLM API & DICTIONARY
+# 7. TÍCH HỢP LLM API
 # ============================================================
 
 def call_llm_api(prompt, api_key=None):
     active_key = api_key or st.secrets.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
 
     if not active_key:
-        st.error("❌ **Chưa tìm thấy OPENROUTER_API_KEY trong Secrets.**")
+        st.error(
+            "❌ **Chưa tìm thấy OPENROUTER_API_KEY.**\n\n"
+            "Vào Streamlit Cloud → Settings → Secrets và thêm:\n"
+            '```toml\nOPENROUTER_API_KEY = "sk-or-v1-..."\n```'
+        )
         return None
 
     try:
@@ -231,6 +307,10 @@ def call_llm_api(prompt, api_key=None):
     except Exception as e:
         st.error(f"❌ Lỗi OpenRouter API: {str(e)}")
         return None
+
+# ============================================================
+# 8. TRA TỪ & DICTIONARY API
+# ============================================================
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_dictionary_data(word):
@@ -264,20 +344,23 @@ def play_audio_script(word):
     window.speechSynthesis.speak(msg);
     </script>
     """
-    components.html(js_code, height=0)
+    data_uri = "data:text/html;charset=utf-8," + urllib.parse.quote(js_code)
+    components.iframe(src=data_uri, height=0)
 
 # ============================================================
-# 7. LOGIC ÔN TẬP TĨNH
+# 9. TẠO CÂU HỎI TĨNH CHO TAB ÔN TẬP
 # ============================================================
 
 FALLBACK_MEANINGS_POOL = [
     "Sự phát triển", "Khả năng thích nghi", "Thành tựu", "Môi trường", "Kinh nghiệm",
     "Khả năng phục hồi", "Đổi mới sáng tạo", "Thách thức", "Cơ hội", "Mục tiêu trọng tâm",
+    "Tiềm năng lớn", "Giải pháp hiệu quả", "Tác động tích cực", "Sự kiên trì", "Nhận thức"
 ]
 
 FALLBACK_WORDS_POOL = [
     "resilience", "innovate", "experience", "development", "adaptation",
     "achievement", "environment", "challenge", "opportunity", "strategy",
+    "perspective", "efficiency", "persistance", "solution", "capability"
 ]
 
 def generate_distractors(target, source_list, fallback_pool, count=3):
@@ -299,7 +382,14 @@ def generate_distractors(target, source_list, fallback_pool, count=3):
     return options
 
 def prepare_review_question(item):
-    q_types = ["CHOICE_MEANING", "FILL_BLANK", "SPELLING", "CONTEXT_MATCH", "FLASHCARD_TRUE_FALSE", "MEANING_CHOICE"]
+    q_types = [
+        "CHOICE_MEANING",
+        "FILL_BLANK",
+        "SPELLING",
+        "CONTEXT_MATCH",
+        "FLASHCARD_TRUE_FALSE",
+        "MEANING_CHOICE",
+    ]
     chosen_q = random.choice(q_types)
 
     st.session_state.review_item = item
@@ -324,7 +414,8 @@ def prepare_review_question(item):
 
     elif chosen_q == "FILL_BLANK":
         blank_sentence = re.sub(r"\b" + re.escape(word) + r"\b", "_____", example, flags=re.IGNORECASE)
-        if blank_sentence == example: blank_sentence = f"{example} _____"
+        if blank_sentence == example:
+            blank_sentence = f"{example} _____"
         st.session_state.q_data = {"sentence": blank_sentence, "answer": word, "word": word}
 
     elif chosen_q == "SPELLING":
@@ -348,6 +439,10 @@ def prepare_review_question(item):
     elif chosen_q == "MEANING_CHOICE":
         options = generate_distractors(word, deck_words, FALLBACK_WORDS_POOL)
         st.session_state.q_data = {"word": word, "question": meaning, "options": options, "answer": word}
+
+# ============================================================
+# 10. TIẾN / LÙI MÓC & XỬ LÝ ĐÁP ÁN
+# ============================================================
 
 def advance_after_correct(item):
     level = int(item.get("level", 0))
@@ -416,9 +511,16 @@ def process_answer(is_correct, correct_ans_text):
         st.success("✨ Chính xác!")
         st.write(f"⚡ Thời gian phản hồi: **{response_time:.1f} giây**")
         st.success(f"📈 Cấp {old_level}, móc {old_hook}/4 → Cấp {item['level']}, móc {item['hook']}/4")
+        if new_interval_hours > 0: st.info(f"⏰ Móc tiếp theo: **{format_hours(new_interval_hours)}**")
+        if old_level < item["level"]:
+            st.balloons()
+            st.success(f"🎉 Đã lên Cấp {item['level']}!")
+        if item["level"] == 5 and item["hook"] == 4: st.success("🏆 Từ này đã đạt Cấp 5 — Móc 4!")
     else:
         st.error("❌ Chưa chính xác.")
         st.warning(f"Đáp án đúng: **{correct_ans_text}**")
+        st.warning(f"📉 Cấp {old_level}, móc {old_hook}/4 → Cấp {item['level']}, móc {item['hook']}/4")
+        if new_interval_hours > 0: st.info(f"🔄 Móc mới: **{format_hours(new_interval_hours)}**")
 
     save_deck()
 
@@ -449,141 +551,243 @@ def reset_all_to_level_zero():
     save_deck()
 
 # ============================================================
-# 8. HEADER & ĐỒNG BỘ WEBRTC P2P REALTIME
+# 11. HEADER & ĐỒNG BỘ THIẾT BỊ (CLOUD + P2P REALTIME)
 # ============================================================
 
-st.title("🍌 MochiVocab AI")
-st.caption("Dynamic Golden Time • Kết nối truyền dữ liệu P2P Thời Gian Thực")
+st.title("🍌 MochiVocab")
+st.caption("Dynamic Golden Time • Học theo cấp và 4 móc ghi nhớ")
 
-# Xử lý P2P Sync Box
-with st.expander("⚡ Đồng Bộ Từ Vựng Trực Tiếp (P2P WebRTC Realtime)", expanded=False):
-    c_p1, c_p2 = st.columns([3, 1])
-    with c_p1:
-        user_room = st.text_input("🔑 Mã phòng P2P chung giữa 2 máy:", value=st.session_state.p2p_room_id)
-        if user_room != st.session_state.p2p_room_id:
-            st.session_state.p2p_room_id = user_room
-    with c_p2:
+# --- EXPANDER 1: ĐỒNG BỘ CLOUD (KEY 8 SỐ) ---
+with st.expander("📲 Đăng Nhập / Đồng Bộ Cloud (Key 8 Số)"):
+    curr_key = st.session_state.get("device_key", "")
+    if curr_key:
+        st.success(f"🔑 Mã kết nối hiện tại: **{curr_key}**")
+    else:
+        st.info("💡 Chưa kết nối Key. Hãy thao tác ở **MÁY CÓ TỪ VỰNG trước**.")
+
+    c_k1, c_k2 = st.columns(2)
+    with c_k1:
+        st.markdown("**BƯỚC 1: Thực hiện ở Máy Có Từ**")
+        if st.button("➕ Tạo Key Đăng Nhập Cloud"):
+            if len(st.session_state.deck) == 0:
+                st.error("⚠️ Máy này đang có 0 từ! Hãy bấm tạo Key ở máy CÓ DỮ LIỆU.")
+            else:
+                new_key = f"{random.randint(10000000, 99999999)}"
+                with st.spinner("🚀 Đang tải dữ liệu lên Cloud..."):
+                    serializable_deck = []
+                    for item in st.session_state.deck:
+                        copy_item = dict(item)
+                        if isinstance(copy_item.get("next_review"), datetime):
+                            copy_item["next_review"] = copy_item["next_review"].isoformat()
+                        serializable_deck.append(copy_item)
+                    
+                    if sync_push_to_cloud(new_key, serializable_deck):
+                        st.session_state.device_key = new_key
+                        local_storage.setItem("mochi_device_key", new_key)
+                        st.success(f"🎉 Mã thành công: **{new_key}**!")
+                        time.sleep(1.5)
+                        st.rerun()
+                    else:
+                        st.error("❌ Lỗi mạng, thử lại!")
+
+    with c_k2:
+        st.markdown("**BƯỚC 2: Thực hiện ở Máy Mới**")
+        input_key = st.text_input("Nhập Key 8 số từ máy gốc:", max_chars=8, placeholder="8 chữ số...").strip()
+        if st.button("🔗 Đăng Nhập & Nhận Dữ Liệu"):
+            if len(input_key) == 8 and input_key.isdigit():
+                with st.spinner("🔄 Đang lấy dữ liệu..."):
+                    cloud_data = sync_pull_from_cloud(input_key)
+                    if cloud_data == "NOT_FOUND":
+                        st.error("❌ Mã chưa có dữ liệu!")
+                    elif cloud_data is not None and isinstance(cloud_data, list) and len(cloud_data) > 0:
+                        st.session_state.device_key = input_key
+                        local_storage.setItem("mochi_device_key", input_key)
+                        new_items = [normalize_item(x) for x in cloud_data if isinstance(x, dict)]
+                        st.session_state.deck = new_items
+                        save_deck()
+                        st.success(f"✅ Đã đồng bộ {len(new_items)} từ!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("❌ Không tìm thấy từ vựng nào!")
+            else:
+                st.warning("⚠️ Nhập đúng 8 chữ số.")
+
+# --- EXPANDER 2: ĐỒNG BỘ P2P REALTIME (WEBRTC + PEERJS) ---
+with st.expander("⚡ Đồng bộ P2P Realtime (WebRTC + PeerJS)"):
+    st.caption("Truyền dữ liệu trực tiếp 2 chiều giữa 2 trình duyệt mà không thông qua Database trung gian.")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        user_input = st.text_input("🔑 Nhập/Tạo Mã Đồng Bộ P2P (Ví dụ: room-888):", value=st.session_state.p2p_room_id, key="p2p_input_field")
+        if user_input != st.session_state.p2p_room_id:
+            st.session_state.p2p_room_id = user_input
+
+    with col2:
         st.write("")
         st.write("")
-        if st.button("🎲 Mã Ngẫu Nhiên"):
+        if st.button("🎲 Mã ngẫu nhiên", key="p2p_rand_btn"):
             st.session_state.p2p_room_id = f"room-{random.randint(100, 999)}"
             st.rerun()
 
     sync_key = st.session_state.p2p_room_id.strip()
 
-    # Chuyển đổi deck hiện tại sang JSON để gửi đi khi kết nối P2P thành công
-    serializable_deck = []
-    for item in st.session_state.deck:
-        copy_item = dict(item)
-        if isinstance(copy_item.get("next_review"), datetime):
-            copy_item["next_review"] = copy_item["next_review"].isoformat()
-        serializable_deck.append(copy_item)
-    deck_json_str = json.dumps(serializable_deck, ensure_ascii=False)
+    if sync_key:
+        html_p2p_code = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+        body {{ padding: 10px; background: transparent; }}
+        
+        .status-bar {{ 
+            padding: 10px 15px; 
+            border-radius: 6px; 
+            font-weight: 600; 
+            font-size: 14px; 
+            margin-bottom: 15px; 
+            background: #fff3cd; 
+            color: #856404; 
+            border: 1px solid #ffeeba;
+            transition: all 0.3s ease;
+        }}
+        
+        .container {{ display: flex; gap: 15px; }}
+        .box {{ flex: 1; background: #ffffff; padding: 15px; border-radius: 8px; border: 1px solid #e0e0e0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }}
+        .box h4 {{ margin-bottom: 10px; color: #333; display: flex; align-items: center; gap: 8px; }}
+        
+        textarea {{ 
+            width: 100%; 
+            height: 140px; 
+            padding: 10px; 
+            font-size: 14px; 
+            border-radius: 6px; 
+            border: 1px solid #ccc; 
+            resize: vertical;
+            outline: none;
+            transition: border-color 0.2s;
+        }}
+        textarea:focus {{ border-color: #ff4b4b; }}
+        textarea[readonly] {{ background-color: #f8f9fa; color: #495057; cursor: not-allowed; }}
+    </style>
+</head>
+<body>
 
-    p2p_html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
-        <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 5px; }}
-            .status {{ padding: 8px 12px; border-radius: 6px; font-weight: 600; font-size: 13px; background: #fff3cd; color: #856404; border: 1px solid #ffeeba; margin-bottom: 8px; }}
-            .btn-sync {{ background: #ff4b4b; color: white; border: none; padding: 8px 16px; font-weight: bold; border-radius: 6px; cursor: pointer; display: none; }}
-            .btn-sync:hover {{ background: #d33; }}
-        </style>
-    </head>
-    <body>
-        <div id="status" class="status">⏳ Đang khởi tạo kết nối P2P...</div>
-        <button id="sendBtn" class="btn-sync">🚀 BẮN DỮ LIỆU TỪ VỰNG SANG MÁY KÌA</button>
+    <div id="status" class="status-bar">⏳ Đang kết nối tới máy chủ tín hiệu (Signaling Server)...</div>
 
-        <script>
-            const ROOM_ID = "mochi_p2p_v1_{sync_key}";
-            const statusEl = document.getElementById('status');
-            const sendBtn = document.getElementById('sendBtn');
-            const localDeckData = {deck_json_str};
+    <div class="container">
+        <div class="box">
+            <h4>✏️ Nhập dữ liệu (Máy này)</h4>
+            <textarea id="localText" placeholder="Gõ nội dung vào đây, máy bên kia sẽ nhận ngay lập tức..."></textarea>
+        </div>
+        
+        <div class="box">
+            <h4>📲 Dữ liệu nhận được (Máy đối phương)</h4>
+            <textarea id="remoteText" readonly placeholder="Đang chờ dữ liệu từ máy đối phương..."></textarea>
+        </div>
+    </div>
 
-            let peer = null;
-            let conn = null;
+    <script>
+        const ROOM_ID = "st_p2p_v2_{sync_key}";
+        const statusEl = document.getElementById('status');
+        const localText = document.getElementById('localText');
+        const remoteText = document.getElementById('remoteText');
+        
+        let peer = null;
+        let conn = null;
 
-            const peerConfig = {{
-                host: '0.peerjs.com',
-                port: 443,
-                path: '/',
-                secure: true,
-                config: {{
-                    iceServers: [
-                        {{ urls: 'stun:stun.l.google.com:19302' }},
-                        {{ urls: 'stun:stun1.l.google.com:19302' }}
-                    ]
-                }}
-            }};
+        const peerConfig = {{
+            host: '0.peerjs.com',
+            port: 443,
+            path: '/',
+            secure: true,
+            debug: 1,
+            config: {{
+                iceServers: [
+                    {{ urls: 'stun:stun.l.google.com:19302' }},
+                    {{ urls: 'stun:stun1.l.google.com:19302' }}
+                ]
+            }}
+        }};
 
-            function setStatus(msg, isSuccess) {{
-                statusEl.innerText = msg;
-                statusEl.style.background = isSuccess ? '#d4edda' : '#fff3cd';
-                statusEl.style.color = isSuccess ? '#155724' : '#856404';
-                statusEl.style.borderColor = isSuccess ? '#c3e6cb' : '#ffeeba';
+        function updateStatus(text, type = 'warning') {{
+            statusEl.innerText = text;
+            if (type === 'success') {{
+                statusEl.style.background = '#d4edda'; statusEl.style.color = '#155724'; statusEl.style.borderColor = '#c3e6cb';
+            }} else if (type === 'error') {{
+                statusEl.style.background = '#f8d7da'; statusEl.style.color = '#721c24'; statusEl.style.borderColor = '#f5c6cb';
+            }} else {{
+                statusEl.style.background = '#fff3cd'; statusEl.style.color = '#856404'; statusEl.style.borderColor = '#ffeeba';
+            }}
+        }}
+
+        function initPeer() {{
+            if (typeof Peer === 'undefined') {{
+                updateStatus("⏳ Đang tải thư viện PeerJS...", 'warning');
+                setTimeout(initPeer, 300);
+                return;
             }}
 
-            function initPeer() {{
-                if (typeof Peer === 'undefined') {{ setTimeout(initPeer, 300); return; }}
-                peer = new Peer(ROOM_ID, peerConfig);
+            peer = new Peer(ROOM_ID, peerConfig);
 
-                peer.on('open', (id) => {{
-                    setStatus("🟢 Đang chờ máy đối phương kết nối mã '" + "{sync_key}" + "'...", false);
-                }});
-
-                peer.on('connection', (c) => {{
-                    conn = c;
-                    setupEvents();
-                }});
-
-                peer.on('error', (err) => {{
-                    if (err.type === 'unavailable-id') {{
-                        setStatus("🔄 Đã tìm thấy phòng. Đang ghép nối P2P...", false);
-                        if (peer) peer.destroy();
-                        peer = new Peer(peerConfig);
-                        peer.on('open', () => {{
-                            conn = peer.connect(ROOM_ID, {{ reliable: true }});
-                            setupEvents();
-                        }});
-                    }} else {{
-                        setStatus("❌ Lỗi P2P: " + err.type, false);
-                    }}
-                }});
-            }}
-
-            function setupEvents() {{
-                if (!conn) return;
-
-                conn.on('open', () => {{
-                    setStatus("✅ ĐÃ KẾT NỐI P2P TRỰC TIẾP VỚI MÁY ĐỐI PHƯƠNG!", true);
-                    sendBtn.style.display = 'inline-block';
-                }});
-
-                conn.on('data', (data) => {{
-                    if (data && data.type === 'MOCHI_DECK_SYNC') {{
-                        alert("🎉 Đã nhận thành công " + data.payload.length + " từ vựng từ máy kia!");
-                        localStorage.setItem("mochi_deck_data", JSON.stringify(data.payload));
-                        window.location.reload();
-                    }}
-                }});
-            }}
-
-            sendBtn.addEventListener('click', () => {{
-                if (conn && conn.open) {{
-                    conn.send({{ type: 'MOCHI_DECK_SYNC', payload: localDeckData }});
-                    alert("🚀 Đã gửi thành công " + localDeckData.length + " từ vựng sang máy kia!");
-                }}
+            peer.on('open', (id) => {{
+                updateStatus("🟢 Đã mở phòng thành công! Hãy mở thiết bị 2 và nhập mã '{sync_key}' để ghép nối.", "warning");
             }});
 
-            setTimeout(initPeer, 200);
-        </script>
-    </body>
-    </html>
-    """
-    components.html(p2p_html, height=100)
+            peer.on('connection', (c) => {{
+                conn = c;
+                setupEvents();
+            }});
+
+            peer.on('error', (err) => {{
+                if (err.type === 'unavailable-id') {{
+                    updateStatus("🔄 Đã tìm thấy Máy 1 (Host). Đang kết nối P2P...", "warning");
+                    if (peer) peer.destroy();
+                    
+                    peer = new Peer(peerConfig);
+                    peer.on('open', () => {{
+                        conn = peer.connect(ROOM_ID, {{ reliable: true }});
+                        setupEvents();
+                    }});
+                }} else {{
+                    updateStatus("❌ Lỗi P2P: " + err.type, 'error');
+                }}
+            }});
+        }}
+
+        function setupEvents() {{
+            if (!conn) return;
+
+            conn.on('open', () => {{
+                updateStatus("✅ KẾT NỐI P2P THÀNH CÔNG! Bắt đầu gõ để đồng bộ tức thì.", 'success');
+            }});
+
+            conn.on('data', (data) => {{
+                remoteText.value = data;
+            }});
+
+            conn.on('close', () => {{
+                updateStatus("⚠️ Kết nối P2P đã ngắt.", 'error');
+            }});
+        }}
+
+        localText.addEventListener('input', (e) => {{
+            const val = e.target.value;
+            if (conn && conn.open) {{
+                conn.send(val);
+            }}
+        }});
+
+        setTimeout(initPeer, 200);
+    </script>
+</body>
+</html>
+"""
+        p2p_data_uri = "data:text/html;charset=utf-8," + urllib.parse.quote(html_p2p_code)
+        components.iframe(src=p2p_data_uri, height=300)
 
 now = datetime.now()
 due_count = sum(1 for x in st.session_state.deck if x.get("next_review") and x["next_review"] <= now)
@@ -608,7 +812,7 @@ selected_tab = st.radio(
 st.markdown("---")
 
 # ============================================================
-# 9. TAB ÔN TẬP
+# 12. TAB ÔN TẬP
 # ============================================================
 
 if selected_tab == "⏰ Ôn Tập":
@@ -638,33 +842,32 @@ if selected_tab == "⏰ Ôn Tập":
         st.info(f"⏰ Còn khoảng **{format_remaining(remaining)}**")
         remaining_seconds = max(0, int(remaining))
 
-        components.html(
-            f"""
-            <div style="text-align:center; background:#262730; color:#00FF66; padding:20px; border-radius:15px; margin-top:15px;">
-                <div style="font-size:13px; color:#AAAAAA; margin-bottom:8px;">THỜI ĐIỂM VÀNG TIẾP THEO</div>
-                <div id="mochi-countdown" style="font-size:30px; font-weight:bold; font-family:monospace;">--:--:--</div>
-            </div>
-            <script>
-                let remaining = {remaining_seconds};
-                function updateCountdown() {{
-                    const countdown = document.getElementById("mochi-countdown");
-                    if (!countdown) return;
-                    if (remaining <= 0) {{ countdown.innerText = "🔥 ĐÃ ĐẾN GIỜ! Hãy chọn lại tab Ôn Tập"; return; }}
-                    const days = Math.floor(remaining / 86400);
-                    const hours = Math.floor((remaining % 86400) / 3600);
-                    const minutes = Math.floor((remaining % 3600) / 60);
-                    const seconds = remaining % 60;
-                    let result = days > 0 ? `${{days}} ngày ${{String(hours).padStart(2, "0")}}:${{String(minutes).padStart(2, "0")}}:${{String(seconds).padStart(2, "0")}}`
-                                          : `${{String(hours).padStart(2, "0")}}:${{String(minutes).padStart(2, "0")}}:${{String(seconds).padStart(2, "0")}}`;
-                    countdown.innerText = result;
-                    remaining--;
-                }}
-                updateCountdown();
-                setInterval(updateCountdown, 1000);
-            </script>
-            """,
-            height=120
-        )
+        countdown_html = f"""
+        <div style="text-align:center; background:#262730; color:#00FF66; padding:20px; border-radius:15px; margin-top:15px;">
+            <div style="font-size:13px; color:#AAAAAA; margin-bottom:8px;">THỜI ĐIỂM VÀNG TIẾP THEO</div>
+            <div id="mochi-countdown" style="font-size:30px; font-weight:bold; font-family:monospace;">--:--:--</div>
+        </div>
+        <script>
+            let remaining = {remaining_seconds};
+            function updateCountdown() {{
+                const countdown = document.getElementById("mochi-countdown");
+                if (!countdown) return;
+                if (remaining <= 0) {{ countdown.innerText = "🔥 ĐÃ ĐẾN GIỜ! Hãy chọn lại tab Ôn Tập"; return; }}
+                const days = Math.floor(remaining / 86400);
+                const hours = Math.floor((remaining % 86400) / 3600);
+                const minutes = Math.floor((remaining % 3600) / 60);
+                const seconds = remaining % 60;
+                let result = days > 0 ? `${{days}} ngày ${{String(hours).padStart(2, "0")}}:${{String(minutes).padStart(2, "0")}}:${{String(seconds).padStart(2, "0")}}`
+                                      : `${{String(hours).padStart(2, "0")}}:${{String(minutes).padStart(2, "0")}}:${{String(seconds).padStart(2, "0")}}`;
+                countdown.innerText = result;
+                remaining--;
+            }}
+            updateCountdown();
+            setInterval(updateCountdown, 1000);
+        </script>
+        """
+        cd_data_uri = "data:text/html;charset=utf-8," + urllib.parse.quote(countdown_html)
+        components.iframe(src=cd_data_uri, height=120)
 
     else:
         if not st.session_state.review_started:
@@ -723,6 +926,7 @@ if selected_tab == "⏰ Ôn Tập":
             if q_type == "CHOICE_MEANING":
                 st.markdown("### 🎲 TRẮC NGHIỆM CHỌN NGHĨA")
                 st.info(f"Từ: **{item['word'].upper()}** `{item.get('phonetic', '')}`")
+
                 if st.button("🔊 Nghe", key="choice_audio"): play_audio_script(item["word"])
 
                 st.write("Chọn nghĩa tiếng Việt:")
@@ -733,7 +937,9 @@ if selected_tab == "⏰ Ôn Tập":
             elif q_type == "FILL_BLANK":
                 st.markdown("### ✏️ ĐIỀN TỪ VÀO CHỖ TRỐNG")
                 st.info(f"**{q_data.get('sentence', '')}**")
-                st.caption(f"💡 Gợi ý cấu trúc từ: `{get_word_hint(item['word'])}`")
+                
+                hint = get_word_hint(item['word'])
+                st.caption(f"💡 Gợi ý cấu trúc từ: `{hint}`")
 
                 user_ans = st.text_input("Từ còn thiếu:", key=f"fill_{item['id']}")
                 if st.button("Xác Nhận", type="primary", key=f"fill_submit_{item['id']}"):
@@ -742,7 +948,9 @@ if selected_tab == "⏰ Ôn Tập":
             elif q_type == "SPELLING":
                 st.markdown("### ✍️ LUYỆN CHÍNH TẢ")
                 st.info(f"Nghĩa tiếng Việt: **{item['meaning'].upper()}**")
-                st.caption(f"💡 Gợi ý cấu trúc từ: `{get_word_hint(item['word'])}`")
+
+                hint = get_word_hint(item['word'])
+                st.caption(f"💡 Gợi ý cấu trúc từ: `{hint}`")
 
                 user_ans = st.text_input("Gõ từ tiếng Anh:", key=f"spell_{item['id']}")
                 if st.button("Xác Nhận", type="primary", key=f"spell_submit_{item['id']}"):
@@ -780,7 +988,7 @@ if selected_tab == "⏰ Ôn Tập":
                         process_answer(option.strip().lower() == item["word"].strip().lower(), item["word"].upper())
 
 # ============================================================
-# 10. TAB TRA TỪ MỚI
+# 13. TAB TRA TỪ MỚI
 # ============================================================
 
 elif selected_tab == "🔍 Tra Từ Mới":
@@ -854,11 +1062,13 @@ Trả về duy nhất định dạng JSON thô (không bọc trong markdown):
                     st.rerun()
 
 # ============================================================
-# 11. TAB QUÉT BÀI ĐỌC
+# 14. TAB QUÉT BÀI ĐỌC
 # ============================================================
 
 elif selected_tab == "📄 Quét Bài Đọc":
     st.subheader("📄 Quét Bài Đọc & Lọc Từ Vựng Theo Trình Độ (A1 - C2)")
+    st.caption("AI sẽ phân tích bài đọc, lọc ra các từ vựng thuộc đúng cấp độ bạn chọn và giải nghĩa chuẩn theo ngữ cảnh.")
+
     input_text = st.text_area("Nhập bài đọc tiếng Anh:", placeholder="Dán đoạn văn tiếng Anh vào đây...", height=160)
 
     col_b1, col_b2 = st.columns([2, 1])
@@ -987,7 +1197,7 @@ Chỉ trả về JSON thô.
             st.rerun()
 
 # ============================================================
-# 12. TAB SỔ TAY
+# 15. TAB SỔ TAY
 # ============================================================
 
 elif selected_tab == "📋 Sổ Tay":
@@ -1107,6 +1317,51 @@ Trả về duy nhất JSON:
 
         st.markdown("---")
 
+        st.markdown("### 🤖 AI Reset Lại Nghĩa & Ví Dụ Cho Toàn Bộ Sổ Tay")
+        if st.button("⚡ AI RESET LẠI TOÀN BỘ SỔ TAY", type="primary", use_container_width=True, key="ai_bulk_reset"):
+            with st.spinner("🤖 AI đang làm mới nghĩa và ví dụ cho toàn bộ từ..."):
+                all_words = [x["word"] for x in st.session_state.deck]
+                prompt_bulk = f"""
+Cung cấp bản dịch nghĩa tiếng Việt ngắn gọn và 1 câu ví dụ ngắn cho danh sách từ sau:
+{json.dumps(all_words)}
+
+Trả về kết quả duy nhất dạng JSON Array:
+[
+  {{ "word": "từ tiếng anh", "meaning": "nghĩa việt", "example": "câu ví dụ" }}
+]
+Chỉ trả về JSON thô.
+"""
+                res = call_llm_api(prompt_bulk)
+                if res:
+                    try:
+                        updated = json.loads(res)
+                        up_dict = {x["word"].lower(): x for x in updated}
+                        for item in st.session_state.deck:
+                            w = item["word"].lower()
+                            if w in up_dict:
+                                item["meaning"] = up_dict[w].get("meaning", item["meaning"])
+                                item["example"] = up_dict[w].get("example", item["example"])
+                        save_deck()
+                        st.success("🎉 Đã reset thành công nghĩa & ví dụ cho toàn bộ Sổ Tay!")
+                        time.sleep(0.8)
+                        st.rerun()
+                    except Exception: st.error("❌ Lỗi phân tích JSON từ AI.")
+
+        st.markdown("---")
+
+        st.markdown("### 📐 Hệ thống Thời Điểm Vàng")
+        hook_table = {
+            "Cấp 0": "0h — Từ mới",
+            "Cấp 1": "1h → 4h → 12h → 24h",
+            "Cấp 2": "25h → 28h → 36h → 48h",
+            "Cấp 3": "49h → 52h → 60h → 72h",
+            "Cấp 4": "73h → 76h → 84h → 96h",
+            "Cấp 5": "97h → 100h → 108h → 120h",
+        }
+        st.table([{"Cấp": level_name, "Các móc": hooks} for level_name, hooks in hook_table.items()])
+
+        st.markdown("---")
+
         if st.button("🔄 RESET ALL VỀ CẤP 0", use_container_width=True, key="reset_all_words"):
             reset_all_to_level_zero()
             st.success("✅ Đã reset toàn bộ từ về Cấp 0.")
@@ -1131,8 +1386,8 @@ Trả về duy nhất JSON:
         st.info("📚 Sổ tay đang trống.")
 
 # ============================================================
-# 13. FOOTER
+# 16. FOOTER
 # ============================================================
 
 st.markdown("---")
-st.caption("🍌 MochiVocab AI • Realtime P2P Synchronization")
+st.caption("🍌 MochiVocab • Dynamic Golden Time")
