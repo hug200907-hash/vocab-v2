@@ -147,9 +147,8 @@ def build_smart_vowel_hint(word, level_tag=1, wrong_count=0):
 
     groups = extract_vowel_groups(word_str)
     
-    # 1. Nếu từ không có nguyên âm (ví dụ: "fly", "rhythm" nếu y không tính hoặc từ quá ngắn)
+    # 1. Nếu từ không có nguyên âm
     if not groups:
-        # Fallback hiển thị ký tự đầu và các gạch dưới
         mask = [word_str[0]] + ["_"] * (n - 1)
         return " ".join(mask) + f" ({n} ký tự)"
 
@@ -161,25 +160,21 @@ def build_smart_vowel_hint(word, level_tag=1, wrong_count=0):
     base_hints = get_base_hints_by_level(level_tag)
     total_steps = base_hints + max(0, int(wrong_count))
 
-    # Tập hợp lưu trữ các chỉ số (index) ký tự được mở trong từ
     revealed_indices = set()
 
     # 4. Duyệt xoay vòng tích lũy theo các bước gợi ý
     for step in range(total_steps):
         group_idx = step % num_groups
-        cycle_count = step // num_groups  # Số lượt quay lại cụm (Level của cụm đó)
+        cycle_count = step // num_groups
         target_group = ranked_groups[group_idx]
 
-        # Mở các chỉ số nguyên âm của cụm này
         group_indices = target_group["indices"]
         for idx in group_indices:
             revealed_indices.add(idx)
 
-        # Cấp độ 2 trở đi (khi xoay vòng lại): Mở thêm ký tự lân cận nếu cụm nguyên âm đã lộ hết
         if cycle_count > 0:
             extra_reveal = cycle_count
             start_i = target_group["start_index"]
-            # Mở thêm ký tự phía sau
             for offset in range(1, extra_reveal + 1):
                 after_idx = group_indices[-1] + offset
                 if after_idx < n:
@@ -188,17 +183,13 @@ def build_smart_vowel_hint(word, level_tag=1, wrong_count=0):
                 if before_idx >= 0:
                     revealed_indices.add(before_idx)
 
-    # Tuyệt đối không làm lộ toàn bộ đáp án khi người dùng chưa trả lời
     if len(revealed_indices) >= n:
-        # Nếu đã lộ hết, giữ lại ít nhất 1 ký tự ẩn ở vị trí chưa trả lời
         unrevealed = [i for i in range(n) if i not in revealed_indices]
         if not unrevealed:
-            # Chọn ẩn lại 1 phụ âm bất kỳ hoặc ký tự cuối
             candidates = [i for i in range(n) if word_str[i] not in VOWELS]
             hide_idx = candidates[-1] if candidates else n - 1
             revealed_indices.remove(hide_idx)
 
-    # 5. Xây dựng chuỗi hiển thị đúng vị trí thật của từ
     display_chars = []
     for i in range(n):
         if i in revealed_indices:
@@ -210,9 +201,6 @@ def build_smart_vowel_hint(word, level_tag=1, wrong_count=0):
     return f"{hint_pattern} ({n} ký tự)"
 
 def get_word_hint(word, level_tag=1, wrong_count=0):
-    """
-    Hàm wrapper gọi thuật toán gợi ý nguyên âm mới.
-    """
     return build_smart_vowel_hint(word, level_tag=level_tag, wrong_count=wrong_count)
 
 def format_hours(hours):
@@ -539,6 +527,75 @@ def call_llm_api(prompt, api_key=None):
         return None
 
 # ============================================================
+# 8.1 ADAPTIVE EXAMPLE GENERATOR (HE CATH NÂNG CẤP CÂU VÍ DỤ)
+# ============================================================
+
+def map_level_to_target_audience(level):
+    """
+    Mapping level hệ thống sang mô tả đối tượng & yêu cầu độ khó.
+    """
+    try:
+        lvl = int(level)
+    except Exception:
+        lvl = 1
+
+    if lvl <= 1:
+        return "LEVEL 1 — Người mới / trẻ nhỏ: Câu cực kỳ dễ, ngắn, từ vựng cơ bản, cấu trúc đơn giản, tình huống rõ ràng, trẻ em đọc hiểu ngay. Không dùng ngữ pháp phức tạp."
+    elif lvl == 2:
+        return "LEVEL 2 — Học sinh tiểu học: Dễ hiểu, có thể dài hơn L1, thêm trạng từ/thời gian/nơi chốn, dùng because/and/but/when đơn giản, tình huống cụ thể, từ vựng quen thuộc."
+    elif lvl == 3:
+        return "LEVEL 3 — Học sinh THCS: Cấu trúc rõ ràng, dùng because/although/while/when/if/before/after, mệnh đề quan hệ đơn giản. Tự nhiên, chủ đề đời thường."
+    elif lvl == 4:
+        return "LEVEL 4 — Học sinh THPT: Ngữ pháp phức tạp hơn, mệnh đề phụ, relative clauses, conditionals, câu dài hơn và tự nhiên. Không dùng từ quá học thuật xa rời thực tế."
+    else:
+        return "LEVEL 5 — Học thuật nâng cao: Cấu trúc học thuật, mệnh đề lồng nhau, diễn đạt trang trọng, collocation, ý tưởng trừu tượng nhưng vẫn tự nhiên và có ngữ cảnh rõ ràng."
+
+def generate_adaptive_example(item, new_level):
+    """
+    Tạo câu ví dụ thích ứng tự động dựa theo level mới sau khi trả lời.
+    Đảm bảo quy tắc One Target Word, Unique Answer, đúng nghĩa và không trùng câu cũ.
+    """
+    word = item.get("word", "").strip()
+    meaning = item.get("meaning", "").strip()
+    prev_example = item.get("example", "").strip()
+    audience_req = map_level_to_target_audience(new_level)
+
+    prompt = f"""
+Bạn là chuyên gia biên soạn giáo trình tiếng Anh thích ứng (Adaptive Learning).
+Hãy tạo MỘT câu ví dụ tiếng Anh mới cho từ mục tiêu (target word).
+
+THÔNG TIN TỪ MỤC TIÊU:
+- Target Word: "{word}"
+- Nghĩa đang học: "{meaning}" (BẮT BUỘC câu ví dụ phải dùng đúng nghĩa này)
+- Cấp độ yêu cầu: Level {new_level}
+- Yêu cầu đối tượng & độ khó: {audience_req}
+- Câu ví dụ cũ: "{prev_example}"
+
+CÁC QUY TẮC BẮT BUỘC:
+1. ONE TARGET WORD: Câu phải xoay quanh từ "{word}", làm nổi bật ý nghĩa của từ này.
+2. NGỮ CẢNH CỤ THỂ & ĐÁP ÁN DUY NHẤT: Ngữ cảnh phải cực kỳ rõ ràng sao cho nếu bỏ từ "{word}" ra (tạo bài tập điền từ FILL_BLANK), thì "{word}" là đáp án tự nhiên và chính xác nhất. Tránh các câu chung chung như "This is a nice ____."
+3. KHÔNG LẶP LẠI CÂU CŨ: Không lặp lại câu cũ "{prev_example}". Hãy đổi sang ngữ cảnh và cấu trúc câu hoàn toàn khác.
+4. ĐỘ KHÓ ĐÚNG LEVEL: Áp dụng đúng từ vựng, ngữ pháp, độ dài và số mệnh đề phù hợp với Level {new_level}.
+5. TỰ NHIÊN: Đánh giá ưu tiên ngữ cảnh đời thường (school, family, friends, daily activities, nature...) cho Level 1-4.
+
+YÊU CẦU ĐẦU RA:
+Trả về duy nhất JSON thô (không có markdown code block, không giải thích):
+{{
+  "example": "Câu ví dụ tiếng Anh hoàn chỉnh ở đây"
+}}
+"""
+    res = call_llm_api(prompt)
+    if res:
+        try:
+            res_data = json.loads(res)
+            new_ex = res_data.get("example", "").strip()
+            if new_ex and len(new_ex) > 3:
+                return new_ex
+        except Exception:
+            pass
+    return None
+
+# ============================================================
 # 9. TRA TỪ & DICTIONARY API
 # ============================================================
 
@@ -657,7 +714,7 @@ def prepare_review_question(item):
         st.session_state.q_data = {"word": word, "question": meaning, "options": options, "answer": word}
 
 # ============================================================
-# 11. TIẾN / LÙI MÓC & XỬ LÝ ĐÁP ÁN
+# 11. TIẾN / LÙI MÓC & XỬ LÝ ĐÁP ÁN (TÍCH HỢP ADAPTIVE EXAMPLE)
 # ============================================================
 
 def advance_after_correct(item):
@@ -704,6 +761,7 @@ def process_answer(is_correct, correct_ans_text):
     overdue_hours = (now - next_rev).total_seconds() / 3600.0 if now > next_rev else 0
     item["review_count"] = int(item.get("review_count", 0)) + 1
 
+    # 1. Cập nhật kết quả & tính toán level/hook mới
     if is_correct:
         item["correct_count"] = int(item.get("correct_count", 0)) + 1
         item["last_result"] = "correct"
@@ -722,7 +780,9 @@ def process_answer(is_correct, correct_ans_text):
     else: item["next_review"] = datetime.now() + timedelta(hours=new_interval_hours)
 
     item["interval"] = new_interval_hours
+    new_level = int(item["level"])
 
+    # 2. Hiển thị kết quả đánh giá cho người dùng
     if is_correct:
         st.success("✨ Chính xác!")
         st.write(f"⚡ Thời gian phản hồi: **{response_time:.1f} giây**")
@@ -738,6 +798,18 @@ def process_answer(is_correct, correct_ans_text):
         st.warning(f"📉 Cấp {old_level}, móc {old_hook}/4 → Cấp {item['level']}, móc {item['hook']}/4")
         if new_interval_hours > 0: st.info(f"🔄 Móc mới: **{format_hours(new_interval_hours)}**")
 
+    # 3. TẠO EXAMPLE MỚI THEO LEVEL MỚI BẰNG AI
+    status_placeholder = st.empty()
+    status_placeholder.info("🤖 AI đang điều chỉnh câu ví dụ theo trình độ...")
+    
+    new_example = generate_adaptive_example(item, new_level)
+    if new_example:
+        item["example"] = new_example
+        status_placeholder.success(f"✨ Example đã được nâng cấp theo Level {new_level}.")
+    else:
+        status_placeholder.empty()
+
+    # 4. Cập nhật dữ liệu vào Deck & lưu trữ Local
     save_deck()
 
     st.session_state.review_item = None
@@ -966,7 +1038,6 @@ if selected_tab == "⏰ Ôn Tập":
                 st.markdown("### ✏️ ĐIỀN TỪ VÀO CHỖ TRỐNG")
                 st.info(f"**{q_data.get('sentence', '')}**")
                 
-                # Gọi hàm gợi ý nguyên âm ưu tiên theo trình độ và số lần sai
                 hint = get_word_hint(item['word'], level_tag=item.get("level", 1), wrong_count=item.get("wrong_count", 0))
                 st.caption(f"💡 Gợi ý nguyên âm: `{hint}`")
 
@@ -979,7 +1050,6 @@ if selected_tab == "⏰ Ôn Tập":
                 st.markdown("### ✍️ LUYỆN CHÍNH TẢ")
                 st.info(f"Nghĩa tiếng Việt: **{item['meaning'].upper()}**")
 
-                # Gọi hàm gợi ý nguyên âm ưu tiên theo trình độ và số lần sai
                 hint = get_word_hint(item['word'], level_tag=item.get("level", 1), wrong_count=item.get("wrong_count", 0))
                 st.caption(f"💡 Gợi ý nguyên âm: `{hint}`")
 
