@@ -5,7 +5,6 @@ import os
 import re
 import urllib.parse
 import urllib.request
-import requests
 from datetime import datetime, timedelta
 
 import streamlit as st
@@ -56,7 +55,8 @@ DEFAULT_STATE = {
     "search_filter": "",
     "all_scanned_words": [],
     "current_batch_index": 0,
-    "p2p_room_id": "room-888",
+    "sync_room_id": "mochi-sync-888",
+    "sync_status_msg": "Chưa kết nối P2P",
 }
 
 for key, value in DEFAULT_STATE.items():
@@ -484,188 +484,158 @@ def reset_all_to_level_zero():
     save_deck()
 
 # ============================================================
-# 11. HEADER & ĐỒNG BỘ THIẾT BỊ (P2P REALTIME CHỈ DÙNG ST.IFRAME)
+# 11. ENGINE ĐỒNG BỘ P2P NỔI BÊN NỀN (BACKGROUND IFRAME ENGINE)
 # ============================================================
 
-st.title("⚡ Đồng bộ P2P Realtime (WebRTC + PeerJS)")
-st.caption("Truyền dữ liệu trực tiếp 2 chiều giữa 2 trình duyệt mà không thông qua Database trung gian.")
+def render_p2p_background_engine(room_id):
+    """Iframe ẩn đóng vai trò làm Engine truyền tin P2P WebRTC giữa các máy"""
+    html_engine = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    </head>
+    <body style="margin:0; padding:0; background:transparent;">
+        <script>
+            const ROOM_ID = "mochi_p2p_v2_{room_id}";
+            let peer = null, conn = null;
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    user_input = st.text_input("🔑 Nhập/Tạo Mã Đồng Bộ (Ví dụ: room-888):", value=st.session_state.p2p_room_id)
-    if user_input != st.session_state.p2p_room_id:
-        st.session_state.p2p_room_id = user_input
+            const peerConfig = {{
+                host: '0.peerjs.com',
+                port: 443,
+                path: '/',
+                secure: true,
+                config: {{
+                    iceServers: [
+                        {{ urls: 'stun:stun.l.google.com:19302' }},
+                        {{ urls: 'stun:stun1.l.google.com:19302' }}
+                    ]
+                }}
+            }};
 
-with col2:
-    st.write("")
-    st.write("")
-    if st.button("🎲 Tạo mã ngẫu nhiên"):
-        st.session_state.p2p_room_id = f"room-{random.randint(100, 999)}"
-        st.rerun()
+            function initPeer() {{
+                if (typeof Peer === 'undefined') {{ setTimeout(initPeer, 200); return; }}
+                peer = new Peer(ROOM_ID, peerConfig);
 
-sync_key = st.session_state.p2p_room_id.strip()
+                peer.on('open', (id) => console.log('P2P Host Ready: ' + id));
+                peer.on('connection', (c) => {{ conn = c; setupEvents(); }});
 
-if not sync_key:
-    st.warning("⚠️ Vui lòng nhập mã phòng để bắt đầu.")
-    st.stop()
-
-# HTML + JS tích hợp PeerJS dùng STUN Google
-html_code = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
-    <style>
-        * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-        body {{ padding: 10px; background: transparent; }}
-        
-        .status-bar {{ 
-            padding: 10px 15px; 
-            border-radius: 6px; 
-            font-weight: 600; 
-            font-size: 14px; 
-            margin-bottom: 15px; 
-            background: #fff3cd; 
-            color: #856404; 
-            border: 1px solid #ffeeba;
-            transition: all 0.3s ease;
-        }}
-        
-        .container {{ display: flex; gap: 15px; }}
-        .box {{ flex: 1; background: #ffffff; padding: 15px; border-radius: 8px; border: 1px solid #e0e0e0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }}
-        .box h4 {{ margin-bottom: 10px; color: #333; display: flex; align-items: center; gap: 8px; }}
-        
-        textarea {{ 
-            width: 100%; 
-            height: 140px; 
-            padding: 10px; 
-            font-size: 14px; 
-            border-radius: 6px; 
-            border: 1px solid #ccc; 
-            resize: vertical;
-            outline: none;
-            transition: border-color 0.2s;
-        }}
-        textarea:focus {{ border-color: #ff4b4b; }}
-        textarea[readonly] {{ background-color: #f8f9fa; color: #495057; cursor: not-allowed; }}
-    </style>
-</head>
-<body>
-
-    <div id="status" class="status-bar">⏳ Đang kết nối tới máy chủ tín hiệu (Signaling Server)...</div>
-
-    <div class="container">
-        <div class="box">
-            <h4>✏️ Nhập dữ liệu (Máy này)</h4>
-            <textarea id="localText" placeholder="Gõ nội dung vào đây, máy bên kia sẽ nhận ngay lập tức..."></textarea>
-        </div>
-        
-        <div class="box">
-            <h4>📲 Dữ liệu nhận được (Máy đối phương)</h4>
-            <textarea id="remoteText" readonly placeholder="Đang chờ dữ liệu từ máy đối phương..."></textarea>
-        </div>
-    </div>
-
-    <script>
-        const ROOM_ID = "st_p2p_v2_{sync_key}";
-        const statusEl = document.getElementById('status');
-        const localText = document.getElementById('localText');
-        const remoteText = document.getElementById('remoteText');
-        
-        let peer = null;
-        let conn = null;
-
-        const peerConfig = {{
-            host: '0.peerjs.com',
-            port: 443,
-            path: '/',
-            secure: true,
-            debug: 1,
-            config: {{
-                iceServers: [
-                    {{ urls: 'stun:stun.l.google.com:19302' }},
-                    {{ urls: 'stun:stun1.l.google.com:19302' }}
-                ]
-            }}
-        }};
-
-        function updateStatus(text, type = 'warning') {{
-            statusEl.innerText = text;
-            if (type === 'success') {{
-                statusEl.style.background = '#d4edda'; statusEl.style.color = '#155724'; statusEl.style.borderColor = '#c3e6cb';
-            }} else if (type === 'error') {{
-                statusEl.style.background = '#f8d7da'; statusEl.style.color = '#721c24'; statusEl.style.borderColor = '#f5c6cb';
-            }} else {{
-                statusEl.style.background = '#fff3cd'; statusEl.style.color = '#856404'; statusEl.style.borderColor = '#ffeeba';
-            }}
-        }}
-
-        function initPeer() {{
-            if (typeof Peer === 'undefined') {{
-                updateStatus("⏳ Đang tải thư viện PeerJS...", 'warning');
-                setTimeout(initPeer, 300);
-                return;
+                peer.on('error', (err) => {{
+                    if (err.type === 'unavailable-id') {{
+                        if (peer) peer.destroy();
+                        peer = new Peer(peerConfig);
+                        peer.on('open', () => {{
+                            conn = peer.connect(ROOM_ID, {{ reliable: true }});
+                            setupEvents();
+                        }});
+                    }}
+                }});
             }}
 
-            peer = new Peer(ROOM_ID, peerConfig);
+            function setupEvents() {{
+                if (!conn) return;
+                conn.on('data', (data) => {{
+                    // Nhận dữ liệu P2P từ đối phương -> Lưu vào localStorage để Streamlit đọc
+                    localStorage.setItem('mochi_p2p_received_data', data);
+                }});
+            }}
 
-            peer.on('open', (id) => {{
-                updateStatus("🟢 Đã mở phòng thành công! Hãy mở thiết bị 2 và nhập mã '{sync_key}' để ghép nối.", "warning");
-            }});
-
-            peer.on('connection', (c) => {{
-                conn = c;
-                setupEvents();
-            }});
-
-            peer.on('error', (err) => {{
-                if (err.type === 'unavailable-id') {{
-                    updateStatus("🔄 Đã tìm thấy Máy 1 (Host). Đang kết nối P2P...", "warning");
-                    if (peer) peer.destroy();
-                    
-                    peer = new Peer(peerConfig);
-                    peer.on('open', () => {{
-                        conn = peer.connect(ROOM_ID, {{ reliable: true }});
-                        setupEvents();
-                    }});
-                }} else {{
-                    updateStatus("❌ Lỗi P2P: " + err.type, 'error');
+            // Lắng nghe lệnh gửi dữ liệu từ Streamlit UI
+            window.addEventListener('message', (event) => {{
+                if (event.data && event.data.type === 'SEND_P2P_DATA') {{
+                    if (conn && conn.open) {{
+                        conn.send(event.data.payload);
+                    }}
                 }}
             }});
-        }}
 
-        function setupEvents() {{
-            if (!conn) return;
+            setTimeout(initPeer, 300);
+        </script>
+    </body>
+    </html>
+    """
+    # Nhúng iframe ẩn kích thước 0px
+    st.components.v1.html(html_engine, height=0, width=0)
 
-            conn.on('open', () => {{
-                updateStatus("✅ KẾT NỐI P2P THÀNH CÔNG! Bắt đầu gõ để đồng bộ tức thì.", 'success');
-            }});
+# ============================================================
+# 12. STREAMLIT UI: ĐỒNG BỘ THIẾT BỊ (GIỮ NGUYÊN GIAO DIỆN CŨ)
+# ============================================================
 
-            conn.on('data', (data) => {{
-                remoteText.value = data;
-            }});
+st.subheader("🌐 Đồng bộ dữ liệu P2P (WebRTC)")
 
-            conn.on('close', () => {{
-                updateStatus("⚠️ Kết nối P2P đã ngắt.", 'error');
-            }});
-        }}
+with st.expander("🔑 Cấu hình Mã Đồng Bộ P2P", expanded=True):
+    col_room, col_btn_gen = st.columns([3, 1])
+    with col_room:
+        room_input = st.text_input(
+            "Nhập Mã Đồng Bộ (Ví dụ: mochi-888):",
+            value=st.session_state.sync_room_id,
+            help="Cả 2 máy nhập cùng mã này để kết nối P2P trực tiếp với nhau."
+        )
+        if room_input != st.session_state.sync_room_id:
+            st.session_state.sync_room_id = room_input
+            st.rerun()
 
-        localText.addEventListener('input', (e) => {{
-            const val = e.target.value;
-            if (conn && conn.open) {{
-                conn.send(val);
-            }}
-        }});
+    with col_btn_gen:
+        st.write("")
+        st.write("")
+        if st.button("🎲 Tạo mã mới"):
+            st.session_state.sync_room_id = f"mochi-room-{random.randint(100, 999)}"
+            st.rerun()
 
-        setTimeout(initPeer, 200);
-    </script>
-</body>
-</html>
-"""
+    render_p2p_background_engine(st.session_state.sync_room_id)
 
-# Chỉ dùng st.iframe để nhúng ứng dụng P2P Realtime
-st.iframe(src=html_code, height=300)
+    col1, col2 = st.columns(2)
+
+    # NÚT 1: TẢI DỮ LIỆU LÊN (Gửi P2P sang máy đối phương)
+    with col1:
+        if st.button("☁️ Tải dữ liệu lên (P2P)", type="primary", use_container_width=True):
+            if not st.session_state.deck:
+                st.warning("⚠️ Sổ tay đang trống, không có dữ liệu để tải lên.")
+            else:
+                serializable_deck = []
+                for item in st.session_state.deck:
+                    copy_item = dict(item)
+                    if isinstance(copy_item.get("next_review"), datetime):
+                        copy_item["next_review"] = copy_item["next_review"].isoformat()
+                    serializable_deck.append(copy_item)
+                
+                payload_str = json.dumps(serializable_deck, ensure_ascii=False)
+                
+                # Bắn lệnh vào iframe P2P engine để truyền dữ liệu đi
+                send_js = f"""
+                <script>
+                    const frames = window.parent.document.querySelectorAll('iframe');
+                    frames.forEach(f => {{
+                        f.contentWindow.postMessage({{ type: 'SEND_P2P_DATA', payload: `{payload_str}` }}, '*');
+                    }});
+                </script>
+                """
+                st.components.v1.html(send_js, height=0)
+                st.success(f"🚀 Đã phát tín hiệu P2P gửi {len(st.session_state.deck)} từ vựng sang thiết bị cùng mã!")
+
+    # NÚT 2: TẢI DỮ LIỆU XUỐNG (Đọc P2P nhận được từ máy đối phương)
+    with col2:
+        if st.button("📥 Tải dữ liệu xuống (P2P)", use_container_width=True):
+            try:
+                received_data = local_storage.getItem("mochi_p2p_received_data")
+                if received_data:
+                    items = json.loads(received_data)
+                    if isinstance(items, list) and len(items) > 0:
+                        st.session_state.deck = [normalize_item(x) for x in items if isinstance(x, dict)]
+                        save_deck()
+                        st.success(f"🎉 Đã nhận & cập nhật thành công {len(st.session_state.deck)} từ vựng qua P2P!")
+                        time.sleep(0.8)
+                        st.rerun()
+                    else:
+                        st.warning("⚠️ Dữ liệu P2P nhận được không hợp lệ.")
+                else:
+                    st.info("ℹ️ Chưa thấy dữ liệu từ máy kia gửi sang. Vui lòng bấm 'Tải dữ liệu lên' ở máy gửi trước!")
+            except Exception as e:
+                st.error(f"❌ Không thể tải dữ liệu P2P: {str(e)}")
+
+# ============================================================
+# 13. TABS CHÍNH
+# ============================================================
 
 now = datetime.now()
 due_count = sum(1 for x in st.session_state.deck if x.get("next_review") and x["next_review"] <= now)
@@ -690,7 +660,7 @@ selected_tab = st.radio(
 st.markdown("---")
 
 # ============================================================
-# 12. TAB ÔN TẬP
+# 14. TAB ÔN TẬP
 # ============================================================
 
 if selected_tab == "⏰ Ôn Tập":
@@ -873,7 +843,7 @@ if selected_tab == "⏰ Ôn Tập":
                         process_answer(option.strip().lower() == item["word"].strip().lower(), item["word"].upper())
 
 # ============================================================
-# 13. TAB TRA TỪ MỚI
+# 15. TAB TRA TỪ MỚI
 # ============================================================
 
 elif selected_tab == "🔍 Tra Từ Mới":
@@ -947,7 +917,7 @@ Trả về duy nhất định dạng JSON thô (không bọc trong markdown):
                     st.rerun()
 
 # ============================================================
-# 14. TAB QUÉT BÀI ĐỌC
+# 16. TAB QUÉT BÀI ĐỌC
 # ============================================================
 
 elif selected_tab == "📄 Quét Bài Đọc":
@@ -1082,7 +1052,7 @@ Chỉ trả về JSON thô.
             st.rerun()
 
 # ============================================================
-# 15. TAB SỔ TAY
+# 17. TAB SỔ TAY
 # ============================================================
 
 elif selected_tab == "📋 Sổ Tay":
@@ -1271,7 +1241,7 @@ Chỉ trả về JSON thô.
         st.info("📚 Sổ tay đang trống.")
 
 # ============================================================
-# 16. FOOTER
+# 18. FOOTER
 # ============================================================
 
 st.markdown("---")
