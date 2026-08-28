@@ -88,7 +88,7 @@ for key, value in DEFAULT_STATE.items():
             st.session_state[key] = value
 
 # ============================================================
-# 4. HÀM PHÁT ÂM (TTS) — NATIVE STREAMLIT IMPLEMENTATION
+# 4. HÀM PHÁT ÂM (TTS) & TỐC ĐỘ THEO LEVEL (FIXED)
 # ============================================================
 
 def get_pronunciation_speed(level):
@@ -118,20 +118,63 @@ def get_pronunciation_text(item, level):
     else:
         return item.get("word", "").strip()
 
+def fetch_tts_audio_bytes(text):
+    """
+    Tải trực tiếp MP3 Audio Bytes từ Google TTS Server phía Python backend.
+    Kiểm tra kĩ HTTP status, content-type và dung lượng audio.
+    """
+    clean_text = str(text).strip()
+    if not clean_text:
+        return None
+
+    encoded_text = urllib.parse.quote(clean_text)
+    tts_url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={encoded_text}&tl=en&client=tw-ob"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        req = urllib.request.Request(tts_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as response:
+            if response.status != 200:
+                return None
+            
+            content_type = response.headers.get("Content-Type", "")
+            audio_bytes = response.read()
+
+            # Kiểm tra bytes và content-type hợp lệ
+            if not audio_bytes or len(audio_bytes) < 500:
+                return None
+            if "audio" not in content_type and "mpeg" not in content_type and "octet-stream" not in content_type:
+                return None
+
+            return audio_bytes
+    except Exception:
+        return None
+
 def speak_text(text, speed=1.0, auto_play=True, key_suffix=""):
     """
-    Phát âm tiếng Anh thông qua Native Streamlit Audio (st.audio).
-    Không dùng st.components.v1.html, tuyệt đối tránh deprecation warning & lặp rerun.
+    Phát âm tiếng Anh chuẩn thông qua Streamlit Native Audio (st.audio).
+    Tuyệt đối không render audio rỗng, không dùng st.components.v1.html.
     """
     if not text:
         return
 
-    clean_text = str(text).strip()
-    encoded_text = urllib.parse.quote(clean_text)
-    tts_url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={encoded_text}&tl=en&client=tw-ob"
+    audio_bytes = fetch_tts_audio_bytes(text)
 
-    st.markdown(f"🔊 **Phát âm ({speed}x):** *{clean_text}*")
-    st.audio(tts_url, format="audio/mp3", autoplay=auto_play)
+    if not audio_bytes:
+        st.warning("⚠️ Không thể tải file phát âm (Vui lòng kiểm tra mạng).")
+        return
+
+    # Chuyển audio bytes thành Base64 Data URL ổn định
+    audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+    audio_src = f"data:audio/mpeg;base64,{audio_b64}"
+
+    st.markdown(f"🔊 **Phát âm ({speed}x)**")
+    
+    # Sử dụng st.audio Native của Streamlit
+    st.audio(audio_src, format="audio/mp3", autoplay=auto_play)
 
 # ============================================================
 # 5. THUẬT TOÁN GỢI Ý (HINT) NGUYÊN ÂM THÔNG MINH
@@ -376,7 +419,7 @@ def get_next_id():
     return max(ids) + 1 if ids else 1
 
 # ============================================================
-# 8. HỆ THỐNG ĐỒNG BỘ NỘI BỘ (SYNC)
+# 8. HỆ THỐNG ĐỒNG BỘ NỘI BỘ
 # ============================================================
 
 def generate_sync_key():
@@ -1007,7 +1050,7 @@ if selected_tab == "⏰ Ôn Tập":
                 if example:
                     st.info(f"📖 *{example}*")
 
-                # Cụm TTS Native: st.audio
+                # Cụm TTS: Native Audio Streamlit phát âm ổn định
                 speak_text(text_to_speak, speed=speed, auto_play=should_auto_play, key_suffix="result")
 
                 st.markdown("---")
@@ -1195,7 +1238,7 @@ Trả về duy nhất định dạng JSON thô (không bọc trong markdown):
         st.markdown("---")
         st.info(f"**{data['word'].upper()}** `{data.get('phonetic', '')}`")
 
-        # Nút nghe thử khi tra từ bằng Native Audio
+        # Nút nghe thử khi tra từ
         speak_text(data['word'], speed=1.0, auto_play=False, key_suffix="lookup")
 
         manual_meaning = st.text_input("Chỉnh sửa nghĩa tiếng Việt:", value=data.get("meaning", ""), key=f"manual_m_{data['word']}")
