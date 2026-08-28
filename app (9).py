@@ -88,7 +88,7 @@ for key, value in DEFAULT_STATE.items():
             st.session_state[key] = value
 
 # ============================================================
-# 4. HÀM PHÁT ÂM (TTS) & TỐC ĐỘ THEO LEVEL
+# 4. HÀM PHÁT ÂM (TTS) — NATIVE STREAMLIT IMPLEMENTATION
 # ============================================================
 
 def get_pronunciation_speed(level):
@@ -120,8 +120,8 @@ def get_pronunciation_text(item, level):
 
 def speak_text(text, speed=1.0, auto_play=True, key_suffix=""):
     """
-    Phát âm tiếng Anh thông qua HTML5 Audio Data/Google TTS API.
-    Tương thích hoàn toàn với Streamlit Cloud & Browser Autoplay Policy.
+    Phát âm tiếng Anh thông qua Native Streamlit Audio (st.audio).
+    Không dùng st.components.v1.html, tuyệt đối tránh deprecation warning & lặp rerun.
     """
     if not text:
         return
@@ -130,82 +130,8 @@ def speak_text(text, speed=1.0, auto_play=True, key_suffix=""):
     encoded_text = urllib.parse.quote(clean_text)
     tts_url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={encoded_text}&tl=en&client=tw-ob"
 
-    safe_text_js = json.dumps(clean_text)
-    element_id = f"audio_{abs(hash(clean_text + str(key_suffix)))}"
-
-    html_code = f"""
-    <div style="margin: 8px 0; font-family: sans-serif;">
-        <audio id="{element_id}" src="{tts_url}" preload="auto" style="display:none;"></audio>
-        <button id="btn_{element_id}" onclick="playAudio_{element_id}()" style="
-            background-color: #FFC107;
-            color: #000;
-            border: none;
-            padding: 10px 18px;
-            font-size: 15px;
-            font-weight: bold;
-            border-radius: 8px;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.15);
-            transition: all 0.2s ease;
-        ">
-            🔊 PHÁT ÂM ({speed}x)
-        </button>
-        <div id="err_{element_id}" style="color: #d9534f; font-size: 12px; margin-top: 6px; display: none;">
-            ⚠️ Không thể tự phát âm. Hãy bấm nút 🔊 PHÁT ÂM để nghe.
-        </div>
-    </div>
-
-    <script>
-    (function() {{
-        var audio = document.getElementById('{element_id}');
-        var btn = document.getElementById('btn_{element_id}');
-        var errDiv = document.getElementById('err_{element_id}');
-        var targetSpeed = {float(speed)};
-
-        function applySpeedAndPlay() {{
-            if (!audio) return;
-            audio.playbackRate = targetSpeed;
-            var promise = audio.play();
-            if (promise !== undefined) {{
-                promise.catch(function(error) {{
-                    console.log("Autoplay failed/blocked by browser:", error);
-                    if (errDiv && {'true' if auto_play else 'false'}) {{
-                        errDiv.style.display = 'block';
-                    }}
-                }});
-            }}
-        }}
-
-        window.playAudio_{element_id} = function() {{
-            if (!audio) return;
-            audio.currentTime = 0;
-            audio.playbackRate = targetSpeed;
-            audio.play().catch(function(e) {{
-                console.log("Manual play error:", e);
-                alert("Không thể phát âm thanh. Vui lòng kiểm tra kết nối mạng.");
-            }});
-        }};
-
-        audio.addEventListener('loadedmetadata', function() {{
-            audio.playbackRate = targetSpeed;
-        }});
-
-        audio.addEventListener('error', function() {{
-            if (errDiv) {{
-                errDiv.style.display = 'block';
-            }}
-        }});
-
-        if ({'true' if auto_play else 'false'}) {{
-            setTimeout(applySpeedAndPlay, 150);
-        }}
-    }})();
-    </script>
-    """
-    st.components.v1.html(html_code, height=65)
+    st.markdown(f"🔊 **Phát âm ({speed}x):** *{clean_text}*")
+    st.audio(tts_url, format="audio/mp3", autoplay=auto_play)
 
 # ============================================================
 # 5. THUẬT TOÁN GỢI Ý (HINT) NGUYÊN ÂM THÔNG MINH
@@ -450,7 +376,7 @@ def get_next_id():
     return max(ids) + 1 if ids else 1
 
 # ============================================================
-# 8. HỆ THỐNG ĐỒNG BỘ NỘI BỘ
+# 8. HỆ THỐNG ĐỒNG BỘ NỘI BỘ (SYNC)
 # ============================================================
 
 def generate_sync_key():
@@ -1081,7 +1007,7 @@ if selected_tab == "⏰ Ôn Tập":
                 if example:
                     st.info(f"📖 *{example}*")
 
-                # Cụm TTS: Nút bấm thủ công luôn sẵn sàng + Autoplay kích hoạt ở lượt xem đầu
+                # Cụm TTS Native: st.audio
                 speak_text(text_to_speak, speed=speed, auto_play=should_auto_play, key_suffix="result")
 
                 st.markdown("---")
@@ -1269,7 +1195,7 @@ Trả về duy nhất định dạng JSON thô (không bọc trong markdown):
         st.markdown("---")
         st.info(f"**{data['word'].upper()}** `{data.get('phonetic', '')}`")
 
-        # Nút nghe thử khi tra từ
+        # Nút nghe thử khi tra từ bằng Native Audio
         speak_text(data['word'], speed=1.0, auto_play=False, key_suffix="lookup")
 
         manual_meaning = st.text_input("Chỉnh sửa nghĩa tiếng Việt:", value=data.get("meaning", ""), key=f"manual_m_{data['word']}")
