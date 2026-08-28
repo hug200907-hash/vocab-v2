@@ -76,8 +76,144 @@ for key, value in DEFAULT_STATE.items():
             st.session_state[key] = value
 
 # ============================================================
-# 4. FORMAT & HELPER
+# 4. THUẬT TOÁN GỢI Ý (HINT) NGUYÊN ÂM THÔNG MINH (MOCHIVOCAB)
 # ============================================================
+
+VOWELS = set("aeiouyAEIOUY")
+
+def extract_vowel_groups(word):
+    """
+    Phân tích từ và trích xuất các cụm nguyên âm đứng liền nhau.
+    Trả về danh sách dict chứa: text, indices, length, start_index.
+    """
+    groups = []
+    i = 0
+    n = len(word)
+    while i < n:
+        if word[i] in VOWELS:
+            start = i
+            v_chars = []
+            indices = []
+            while i < n and word[i] in VOWELS:
+                v_chars.append(word[i])
+                indices.append(i)
+                i += 1
+            groups.append({
+                "text": "".join(v_chars),
+                "indices": indices,
+                "length": len(indices),
+                "start_index": start
+            })
+        else:
+            i += 1
+    return groups
+
+def rank_vowel_groups(groups):
+    """
+    Sắp xếp các cụm nguyên âm theo thứ tự ưu tiên:
+    1. Độ dài cụm giảm dần (cụm dài nhất lên đầu)
+    2. Nếu cùng độ dài: Ưu tiên cụm xuất hiện trước trong từ (start_index tăng dần)
+    """
+    return sorted(groups, key=lambda g: (-g["length"], g["start_index"]))
+
+def get_base_hints_by_level(level_tag_or_num):
+    """
+    Xác định số lượng gợi ý cơ bản dựa trên trình độ người học A1 -> C2.
+    """
+    tag = str(level_tag_or_num).upper()
+    if "A1" in tag or tag == "1":
+        return 1
+    elif "A2" in tag or tag == "2":
+        return 2
+    elif "B1" in tag or tag == "3":
+        return 2
+    elif "B2" in tag or tag == "4":
+        return 3
+    elif "C1" in tag or tag == "5":
+        return 3
+    elif "C2" in tag:
+        return 4
+    return 1
+
+def build_smart_vowel_hint(word, level_tag=1, wrong_count=0):
+    """
+    Xây dựng chuỗi gợi ý tích lũy dựa trên hệ thống ưu tiên cụm nguyên âm,
+    kết hợp level A1-C2 và số lần trả lời sai (wrong_count).
+    """
+    word_str = str(word).strip()
+    n = len(word_str)
+    if n == 0:
+        return ""
+
+    groups = extract_vowel_groups(word_str)
+    
+    # 1. Nếu từ không có nguyên âm (ví dụ: "fly", "rhythm" nếu y không tính hoặc từ quá ngắn)
+    if not groups:
+        # Fallback hiển thị ký tự đầu và các gạch dưới
+        mask = [word_str[0]] + ["_"] * (n - 1)
+        return " ".join(mask) + f" ({n} ký tự)"
+
+    # 2. Sắp xếp các cụm nguyên âm theo độ dài & vị trí
+    ranked_groups = rank_vowel_groups(groups)
+    num_groups = len(ranked_groups)
+
+    # 3. Tính tổng số bước gợi ý (Hint steps)
+    base_hints = get_base_hints_by_level(level_tag)
+    total_steps = base_hints + max(0, int(wrong_count))
+
+    # Tập hợp lưu trữ các chỉ số (index) ký tự được mở trong từ
+    revealed_indices = set()
+
+    # 4. Duyệt xoay vòng tích lũy theo các bước gợi ý
+    for step in range(total_steps):
+        group_idx = step % num_groups
+        cycle_count = step // num_groups  # Số lượt quay lại cụm (Level của cụm đó)
+        target_group = ranked_groups[group_idx]
+
+        # Mở các chỉ số nguyên âm của cụm này
+        group_indices = target_group["indices"]
+        for idx in group_indices:
+            revealed_indices.add(idx)
+
+        # Cấp độ 2 trở đi (khi xoay vòng lại): Mở thêm ký tự lân cận nếu cụm nguyên âm đã lộ hết
+        if cycle_count > 0:
+            extra_reveal = cycle_count
+            start_i = target_group["start_index"]
+            # Mở thêm ký tự phía sau
+            for offset in range(1, extra_reveal + 1):
+                after_idx = group_indices[-1] + offset
+                if after_idx < n:
+                    revealed_indices.add(after_idx)
+                before_idx = start_i - offset
+                if before_idx >= 0:
+                    revealed_indices.add(before_idx)
+
+    # Tuyệt đối không làm lộ toàn bộ đáp án khi người dùng chưa trả lời
+    if len(revealed_indices) >= n:
+        # Nếu đã lộ hết, giữ lại ít nhất 1 ký tự ẩn ở vị trí chưa trả lời
+        unrevealed = [i for i in range(n) if i not in revealed_indices]
+        if not unrevealed:
+            # Chọn ẩn lại 1 phụ âm bất kỳ hoặc ký tự cuối
+            candidates = [i for i in range(n) if word_str[i] not in VOWELS]
+            hide_idx = candidates[-1] if candidates else n - 1
+            revealed_indices.remove(hide_idx)
+
+    # 5. Xây dựng chuỗi hiển thị đúng vị trí thật của từ
+    display_chars = []
+    for i in range(n):
+        if i in revealed_indices:
+            display_chars.append(word_str[i])
+        else:
+            display_chars.append("_")
+
+    hint_pattern = " ".join(display_chars)
+    return f"{hint_pattern} ({n} ký tự)"
+
+def get_word_hint(word, level_tag=1, wrong_count=0):
+    """
+    Hàm wrapper gọi thuật toán gợi ý nguyên âm mới.
+    """
+    return build_smart_vowel_hint(word, level_tag=level_tag, wrong_count=wrong_count)
 
 def format_hours(hours):
     hours = float(hours)
@@ -92,13 +228,6 @@ def format_remaining(seconds):
     if days > 0:
         return f"{days} ngày {hours:02d}:{minutes:02d}:{seconds:02d}"
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-def get_word_hint(word):
-    word = word.strip()
-    if len(word) <= 2:
-        return f"{word[0]}..." if len(word) > 0 else ""
-    hint_pattern = f"{word[0]} " + " ".join(["_"] * (len(word) - 2)) + f" {word[-1]}"
-    return f"{hint_pattern} ({len(word)} ký tự)"
 
 # ============================================================
 # 5. THÔNG TIN CẤP / MÓC
@@ -226,12 +355,10 @@ def get_next_id():
 # ============================================================
 
 def generate_sync_key():
-    """Tạo Sync Key ngẫu nhiên 8 ký tự gồm chữ in hoa và số"""
     chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     return "".join(random.choices(chars, k=8))
 
 def get_sync_key():
-    """Lấy Key từ session hoặc localStorage, nếu chưa có thì tạo mới"""
     key = st.session_state.get("sync_key", "")
     if not key or len(key) != 8:
         try:
@@ -247,7 +374,6 @@ def get_sync_key():
     return key
 
 def _derive_key(passphrase: str, salt: bytes) -> bytes:
-    """Tạo AES key từ Sync Key"""
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -257,7 +383,6 @@ def _derive_key(passphrase: str, salt: bytes) -> bytes:
     return kdf.derive(passphrase.encode("utf-8"))
 
 def export_sync_file(key, deck_list):
-    """Đóng gói và mã hóa dữ liệu thành file đồng bộ .mochi"""
     serializable_deck = []
     for item in deck_list:
         c = dict(item)
@@ -280,14 +405,11 @@ def export_sync_file(key, deck_list):
     aesgcm = AESGCM(aes_key)
     ciphertext = aesgcm.encrypt(nonce, json_bytes, None)
     
-    # Kết hợp Salt + Nonce + Ciphertext
     file_bytes = salt + nonce + ciphertext
     return file_bytes
 
 def validate_and_decrypt_sync_file(file_bytes, current_key):
-    """Giải mã file .mochi và kiểm tra Sync Key"""
     try:
-        # Nếu chưa được mã hóa (JSON thuần)
         try:
             data = json.loads(file_bytes.decode("utf-8"))
             if data.get("sync_key") != current_key:
@@ -296,7 +418,6 @@ def validate_and_decrypt_sync_file(file_bytes, current_key):
         except (UnicodeDecodeError, json.JSONDecodeError):
             pass
 
-        # Giải mã AES-GCM
         if len(file_bytes) < 28:
             return False, "❌ Tập tin bị hỏng hoặc không đúng định dạng.", None
 
@@ -320,10 +441,8 @@ def validate_and_decrypt_sync_file(file_bytes, current_key):
         return False, f"❌ Không thể giải mã file. Mã đồng bộ của máy này ({current_key}) không khớp với mã tạo file!", None
 
 def merge_items(local_item, imported_item):
-    """Gộp 2 bản ghi trùng ID hoặc trùng từ, giữ lại dữ liệu học tập cao/mới hơn"""
     merged = dict(local_item)
     
-    # Ưu tiên cấp độ và tiến trình học cao hơn
     local_lv = int(local_item.get("level", 0))
     imp_lv = int(imported_item.get("level", 0))
     
@@ -333,11 +452,9 @@ def merge_items(local_item, imported_item):
         merged["interval"] = imported_item.get("interval", merged.get("interval"))
         merged["next_review"] = imported_item.get("next_review", merged.get("next_review"))
 
-    # Bảo toàn thống kê ôn tập (lấy số lần học lớn hơn)
     for field in ["review_count", "correct_count", "wrong_count"]:
         merged[field] = max(int(local_item.get(field, 0)), int(imported_item.get(field, 0)))
 
-    # Ưu tiên các thông tin chi tiết hơn nếu local bị thiếu
     for field in ["phonetic", "meaning", "example"]:
         if not merged.get(field) and imported_item.get(field):
             merged[field] = imported_item.get(field)
@@ -345,11 +462,9 @@ def merge_items(local_item, imported_item):
     return normalize_item(merged)
 
 def merge_decks(local_deck, imported_deck):
-    """Hợp nhất 2 danh sách dữ liệu 2 chiều không làm mất từ và không lặp ID"""
     merged_map = {}
     word_to_id = {}
 
-    # 1. Nạp dữ liệu Local
     for item in local_deck:
         norm = normalize_item(item)
         item_id = norm["id"]
@@ -359,11 +474,9 @@ def merge_decks(local_deck, imported_deck):
         if word:
             word_to_id[word] = item_id
 
-    # Track thống kê
     duplicate_count = 0
     added_count = 0
 
-    # 2. Merge dữ liệu Imported
     for item in imported_deck:
         norm = normalize_item(item)
         imp_id = norm["id"]
@@ -379,7 +492,6 @@ def merge_decks(local_deck, imported_deck):
             merged_map[target_id] = merge_items(merged_map[target_id], norm)
             duplicate_count += 1
         else:
-            # Tạo ID mới nếu trùng ID với local nhưng khác từ
             if imp_id in merged_map or imp_id == 0:
                 new_id = max(list(merged_map.keys()) + [0]) + 1
                 norm["id"] = new_id
@@ -710,7 +822,6 @@ with st.expander("☁️ Đồng bộ dữ liệu"):
         if uploaded_file is not None:
             file_bytes = uploaded_file.read()
             
-            # 1. Giải mã & Validate
             is_valid, msg, imported_deck = validate_and_decrypt_sync_file(file_bytes, current_sync_key)
             
             if not is_valid:
@@ -718,11 +829,9 @@ with st.expander("☁️ Đồng bộ dữ liệu"):
             else:
                 st.success(msg)
                 
-                # 2. MERGE 2 CHIỀU trên bản COPY trước
                 local_copy = [dict(x) for x in st.session_state.deck]
                 merged_deck, count_local, count_imp, count_dup, count_final = merge_decks(local_copy, imported_deck)
                 
-                # 3. Ghi đè Local & Lưu
                 st.session_state.deck = merged_deck
                 save_deck()
 
@@ -852,25 +961,27 @@ if selected_tab == "⏰ Ôn Tập":
                     if st.button(option, key=f"choice_{item['id']}_{index}"):
                         process_answer(option.strip().lower() == item["meaning"].strip().lower(), item["meaning"])
 
-            # 2. FILL BLANK
+            # 2. FILL BLANK (SỬ DỤNG HINT THÔNG MINH NGUYÊN ÂM)
             elif q_type == "FILL_BLANK":
                 st.markdown("### ✏️ ĐIỀN TỪ VÀO CHỖ TRỐNG")
                 st.info(f"**{q_data.get('sentence', '')}**")
                 
-                hint = get_word_hint(item['word'])
-                st.caption(f"💡 Gợi ý cấu trúc từ: `{hint}`")
+                # Gọi hàm gợi ý nguyên âm ưu tiên theo trình độ và số lần sai
+                hint = get_word_hint(item['word'], level_tag=item.get("level", 1), wrong_count=item.get("wrong_count", 0))
+                st.caption(f"💡 Gợi ý nguyên âm: `{hint}`")
 
                 user_ans = st.text_input("Từ còn thiếu:", key=f"fill_{item['id']}")
                 if st.button("Xác Nhận", type="primary", key=f"fill_submit_{item['id']}"):
                     process_answer(user_ans.strip().lower() == item["word"].strip().lower(), item["word"].upper())
 
-            # 3. SPELLING
+            # 3. SPELLING (SỬ DỤNG HINT THÔNG MINH NGUYÊN ÂM)
             elif q_type == "SPELLING":
                 st.markdown("### ✍️ LUYỆN CHÍNH TẢ")
                 st.info(f"Nghĩa tiếng Việt: **{item['meaning'].upper()}**")
 
-                hint = get_word_hint(item['word'])
-                st.caption(f"💡 Gợi ý cấu trúc từ: `{hint}`")
+                # Gọi hàm gợi ý nguyên âm ưu tiên theo trình độ và số lần sai
+                hint = get_word_hint(item['word'], level_tag=item.get("level", 1), wrong_count=item.get("wrong_count", 0))
+                st.caption(f"💡 Gợi ý nguyên âm: `{hint}`")
 
                 user_ans = st.text_input("Gõ từ tiếng Anh:", key=f"spell_{item['id']}")
                 if st.button("Xác Nhận", type="primary", key=f"spell_submit_{item['id']}"):
@@ -1134,14 +1245,9 @@ elif selected_tab == "📋 Sổ Tay":
 
         st.markdown("---")
 
-        # ----------------------------------------------------
-        # BỔ SUNG: NÚT "🤖 TỰ ĐỘNG GỘP TỪ TRUNG LẬP" & LOGIC HOÀN TÁC
-        # ----------------------------------------------------
-        
         col_btn_merge, col_btn_undo = st.columns([2, 1])
         with col_btn_merge:
             if st.button("🤖 Tự động gộp từ trung lập", use_container_width=True, key="btn_trigger_auto_merge"):
-                # Xác định từ trung lập: các từ đang ở level == 0 (từ mới chưa đi vào tiến trình học)
                 neutral_items = [x for x in st.session_state.deck if int(x.get("level", 0)) == 0]
                 total_neutral = len(neutral_items)
 
@@ -1149,7 +1255,6 @@ elif selected_tab == "📋 Sổ Tay":
                     st.info("ℹ️ Không có từ trung lập nào cần gộp.")
                     st.session_state.auto_merge_neutral_preview = None
                 else:
-                    # Gom nhóm các từ trung lập theo mặt chữ
                     groups = {}
                     for item in neutral_items:
                         key = item.get("word", "").strip().lower()
@@ -1176,7 +1281,6 @@ elif selected_tab == "📋 Sổ Tay":
                     time.sleep(0.8)
                     st.rerun()
 
-        # Hiển thị bước Xác nhận Thống kê trước khi gộp
         preview_data = st.session_state.get("auto_merge_neutral_preview")
         if preview_data:
             st.info(
@@ -1189,25 +1293,20 @@ elif selected_tab == "📋 Sổ Tay":
             col_cf1, col_cf2 = st.columns(2)
             with col_cf1:
                 if st.button("[ Tiếp tục gộp ]", type="primary", use_container_width=True, key="btn_confirm_merge"):
-                    # 1. Tạo Backup hoàn tác
                     st.session_state.auto_merge_neutral_undo_backup = [dict(x) for x in st.session_state.deck]
 
-                    # 2. Phân tách danh sách: Giữ nguyên các từ không phải trung lập (level > 0)
                     non_neutral_deck = [x for x in st.session_state.deck if int(x.get("level", 0)) > 0]
                     
-                    # 3. Tiến hành gộp các từ trung lập theo từng nhóm phù hợp
                     merged_neutral_deck = []
                     for word_key, group in preview_data["groups"].items():
                         if len(group) == 1:
                             merged_neutral_deck.append(group[0])
                         else:
-                            # Gộp các items trong cùng 1 nhóm bằng logic merge_items hiện có
                             base_item = group[0]
                             for other_item in group[1:]:
                                 base_item = merge_items(base_item, other_item)
                             merged_neutral_deck.append(base_item)
 
-                    # 4. Hợp nhất lại toàn bộ dữ liệu & Lưu Local Storage
                     new_deck = non_neutral_deck + merged_neutral_deck
                     st.session_state.deck = new_deck
                     save_deck()
